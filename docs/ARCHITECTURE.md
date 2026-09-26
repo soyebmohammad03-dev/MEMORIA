@@ -5,14 +5,53 @@ in the Decision Log (§9). Code that contradicts it is a bug in one of the two.
 
 ## 1. Purpose
 
-MEMORIA is an experimental observatory for one question:
+MEMORIA is an experimental laboratory and observatory for studying the formation,
+representation, consolidation, retrieval, revision, forgetting, interference,
+contamination, provenance, and reliability of artificial memory over long interaction
+horizons. Its founding question remains:
 
 > What actually happens to an AI system's memory as experiences accumulate, change,
 > conflict, and disappear over time?
 
 It is an instrument, not a product. Its outputs are **measurements and evidence**, not
 chat features. A memory system under study is a *subject*; MEMORIA is the apparatus
-that feeds it experiences, intervenes, observes, and records.
+that feeds it experiences, intervenes, observes, and records. Different memory
+architectures and policies are compared under controlled, reproducible conditions.
+
+### 1.1 The research loop
+
+```
+experience → encoding → memory formation → consolidation → memory representation
+  → indexing → retrieval → response → evaluation → feedback → belief revision
+  → forgetting / interference → longitudinal analysis
+```
+
+Every arrow is a recorded, replayable transformation with provenance. Phases 1–4
+implement experience → formation → representation (bitemporal versions) → retrieval →
+response → evaluation; the remaining arrows are the roadmap (§8).
+
+### 1.2 Research questions
+
+Each phase names the questions it serves (see [ROADMAP.md](ROADMAP.md)). Answers are
+claims only when backed by stored runs and statistics (Principles 1, 3, 4).
+
+| # | Question |
+|---|---|
+| RQ1 | What information becomes durable memory? |
+| RQ2 | What causes memories to be forgotten? |
+| RQ3 | When do semantically similar memories interfere? |
+| RQ4 | How do contradictory experiences change stored beliefs? |
+| RQ5 | How does source reliability affect memory? |
+| RQ6 | Does repeated exposure strengthen false information? |
+| RQ7 | How does temporal distance affect retrieval? |
+| RQ8 | Does semantic abstraction improve or damage factual fidelity? |
+| RQ9 | How does consolidation trade specificity for generalisation? |
+| RQ10 | How resilient is a memory system to contamination? |
+| RQ11 | Can an incorrect memory be corrected without damaging unrelated memories? |
+| RQ12 | How does retrieval policy change long-horizon reliability? |
+| RQ13 | How does memory capacity affect forgetting and interference? |
+| RQ14 | How does retrieval frequency change future recall? |
+| RQ15 | Can the system explain exactly why a particular memory influenced a response? |
 
 ## 2. Research Principles
 
@@ -29,6 +68,14 @@ that feeds it experiences, intervenes, observes, and records.
    reportable, not discarded.
 6. **Separate observation from interpretation.** Raw records are stored apart from the
    derived analyses that interpret them.
+7. **Models are experimental artifacts.** Every model (embedder, reranker, language
+   model) is identified by name, version, configuration and pinned weights, and its
+   outputs are stored and verifiable like any other artifact.
+8. **Honest labels.** Nothing is called semantic, neural, learned or "AI" unless it is.
+   Deterministic heuristics are named as what they are.
+9. **Laptop-feasible and local-first.** The deterministic core runs without a GPU,
+   network access or heavy dependencies. Neural components are optional, local, small,
+   and pluggable; no provider is hard-coded.
 
 ## 3. Engineering Invariants
 
@@ -65,6 +112,10 @@ These are enforced in code and tests, not by convention.
 | I27 | Effects are measured only by paired comparison on identical probes of two runs that differ in exactly one manifest variable (Principle 4). |
 | I28 | A classification records the rule that fired and the claims it relied on. Answer text decides *whether* an answer matches; provenance decides *why* it failed. |
 | I29 | Every paired test reports its counts, a Newcombe interval, an exact p-value, its Holm adjustment within a family, and whether it is underpowered. |
+| I30 | An embedder's identity is its `EmbedderSpec` digest (name, version, dimensions, preprocessing, normalisation, parameters). Every vector is validated for count, dimensionality, finiteness and declared normalisation. |
+| I31 | Vectors from different embedder specs are never compared: loading, searching or verifying an index with another embedder is refused. |
+| I32 | A semantic index binds its embedder spec, source state, entries, preprocessed-text digests and vector artifact by digest; rebuilding from the source state reproduces the vectors (bit-for-bit for deterministic embedders). |
+| I33 | Manifest schema evolution never changes the digest of an existing manifest (§4.7). |
 
 Tooling standard: Python ≥3.12, Pydantic v2, `mypy --strict`, Ruff, pytest with warnings
 as errors, `uv` with a committed lockfile, CI on every push.
@@ -94,7 +145,9 @@ as errors, `uv` with a committed lockfile, CI on every push.
 | **Classification** | A probe outcome class, the rule that fired, the failure locus, and the claims used. | `taxonomy.py` |
 | **Measurement** | A metric value with n, interval, the probes counted, and (via its `Evaluation`) the run it came from. | `evaluation.py`, `statistics.py` |
 | **Evaluation / RunComparison** | All probe judgements and measurements for one run; a paired baseline-vs-treatment comparison of two evaluations. | `evaluation.py` |
-| **Autopsy** | The provenance DAG from a response back through retrieval → versions → operations → experiences, at a point in both time axes. | Phase 5 |
+| **Embedder / EmbedderSpec** | Text → fixed-dimension vectors under a recorded identity; `HashedNgramEmbedder` is the deterministic lexical-subword reference (not semantic). | `embeddings.py` |
+| **Semantic index** | Embeddings of a memory state as a stored, verifiable artifact with exact cosine search. | `semantic.py` |
+| **Autopsy** | The provenance DAG from a response back through retrieval → versions → operations → experiences, at a point in both time axes. | Phase 17 |
 
 The `update`/`correct` distinction is deliberate: it separates *temporal change* from
 *error repair*, which is necessary to study supersession and contradiction.
@@ -171,7 +224,7 @@ the top selected memory's content verbatim and abstains when nothing is selected
 
 Known limits: tie-breaking by `memory_id` is deterministic but semantically arbitrary
 (the episodic baseline demonstrably returns a stale report on a three-way tie); no
-dense/semantic signal exists yet (§9).
+dense/semantic signal enters ranking yet (Phase 6; embeddings exist since Phase 5, §4.6).
 
 ### 4.4 Experiment semantics
 
@@ -291,6 +344,37 @@ comparisons. The fact model is the statement language: datasets without it are c
 on text, but claim-based classes cannot apply. The mention reader recognises only values
 asserted somewhere in the dataset.
 
+### 4.6 Semantic memory semantics (Phase 5, slice 1)
+
+`embeddings.embed(embedder, texts)` applies the spec's `Preprocessing` (NFKC, case
+folding, whitespace collapse, optional truncation — each recorded), encodes, and
+validates. `HashedNgramEmbedder` hashes character n-grams of the preprocessed text with
+SHA-256 into signed buckets and L2-normalises the integer counts; empty text is the zero
+vector. It captures spelling, not meaning.
+
+`semantic.SemanticIndex.build(state, embedder, store)` stores the `MemoryState` and a
+little-endian float32 vector blob, and an `IndexManifest`. `search(text, k, embedder)`
+returns `Neighbor`s ranked by quantised cosine over the stored float32 vectors, ties by
+`memory_id` then version digest; zero vectors have similarity 0. `load` refuses a
+different embedder; `verify` re-embeds the source state and requires identical texts
+and bytes. Search is exact (brute force); approximate indexes must be validated against
+it. Semantic signals do not yet enter retrieval ranking (Phase 6).
+
+### 4.7 Experiment degrees of freedom and manifest evolution
+
+The target experiment model varies, independently and explicitly: memory architecture,
+formation policy, consolidation policy, retrieval policy, forgetting policy, source
+model, embedding model, reranker, dataset, interventions, and evaluation specification.
+Today's `RunManifest` records dataset, interventions, policy, retriever and responder;
+evaluation specs are recorded by `Evaluation`.
+
+Rule for adding degrees of freedom (I33): a new manifest field must have a default that
+reproduces current behaviour, and a field at its default is omitted from the canonical
+form, so every existing manifest keeps its digest and every existing run keeps its ID.
+This "manifest schema v2" is implemented with the first phase that adds a degree of
+freedom to runs (the embedding model, completing Phase 5), not before. Nothing that
+changes results may live in global configuration.
+
 ## 5. Module Boundaries
 
 The dependency rule is strict: **dependencies point inward toward `core`**. `core` imports
@@ -310,11 +394,37 @@ comparison    answer readings and agreement  (exists)
 taxonomy      claims, relations, outcome classification  (exists)
 statistics    Wilson, Newcombe paired, exact McNemar, Holm  (exists)
 evaluation    evaluations, measurements, paired comparisons  (exists)
+embeddings    embedding contract, preprocessing, reference embedder  (exists)
+semantic      semantic index artifacts, exact search  (exists)
 provenance    autopsy / provenance graph (NetworkX)
 api           FastAPI surface over the above (no logic of its own)
 observatory   interactive visualisation (consumes api only)
 reports       evidence-backed reports generated from stored runs
 ```
+
+### 5.1 Target architecture
+
+Fifteen composable layers. Each builds on the Phase 1–4 substrate and must preserve its
+invariants: history stays append-only and bitemporal, every derived object cites its
+sources, and every experiment reproduces from its manifest.
+
+| Layer | Responsibility | Builds on | Phase |
+|---|---|---|---|
+| L1 Memory core | Typed memories: episodic and semantic memories, temporal facts, entities, relations, sources, confidence, validity, lineage, consolidation state, supersession, contradiction and abstraction relationships — as explicit types, not a universal object | `core` versions and history | 1 ✓, extended 7, 8, 11, 12 |
+| L2 Formation | Pluggable policies (verbatim, keyed, abstraction, entity-centric, relation extraction, summarisation, hybrid); experience → decision → memory → evidence | `formation` | 2 ✓, extended 7 |
+| L3 Consolidation | candidate → validation → deduplication → merging → abstraction → durable memory, with lineage to every supporting experience | L1, L2, L5 | 7 |
+| L4 Hybrid retrieval | Decomposed signals (lexical, semantic, temporal, recency, reliability, confidence, provenance, contradiction, diversity), rerankers, adaptive policies | `retrieval` signals and traces | 2 ✓, 6, 13 |
+| L5 Semantic memory | Local embedders and indexes as artifacts | `artifacts`, `core` states | 5 (slice 1 ✓) |
+| L6 Memory graph | Provenance and semantic graph with snapshots | all records | 8 |
+| L7 Forgetting lab | Forgetting mechanisms as policies and interventions; nothing deleted | history, interventions | 9 |
+| L8 Interference lab | Controlled similarity, density and repetition | L4, L5, datasets | 10 |
+| L9 Belief dynamics | Competing claims and revision | `taxonomy` relations | 4 ✓ (relations), 11 |
+| L10 Source and trust | Source identity and reliability, independent of content | experiences | 12 |
+| L11 Uncertainty | Separate memory, retrieval and response confidence; calibration | L4, evaluation | 12 |
+| L12 Attack lab | Synthetic contamination and adversarial interventions | `interventions` | 3 ✓ (basic), 14 |
+| L13 Benchmarks | Generated long-horizon datasets with ground truth | `scenarios` | 3 ✓ (seeded), 15 |
+| L14 Autopsy | Response-to-experience explanation as a research object | L6, evaluation | 17 |
+| L15 Longitudinal analysis and observatory | Curves, advanced statistics, API/UI over stored evidence | `evaluation`, `statistics` | 16, 19, 20 |
 
 ### Extension points
 
@@ -330,6 +440,8 @@ introduced **when the first implementation is written** (not as empty scaffoldin
   `reorder`, `contaminate`, `inject`)
 - `experiments.Registry` — resolves manifest names; `extend()` adds components, never
   redefines them
+- `embeddings.Embedder` — text → vectors under an `EmbedderSpec` (exists:
+  `hashed-char-ngrams`; neural adapters behind an optional extra, pending)
 - `Dataset` (a record, not a protocol: any generator producing one plugs in)
 - Evaluation components are versioned names in `EvaluationSpec` (`tokens-v1`,
   `provenance-v1`, readers). One implementation each exists, so there is no registry;
@@ -352,6 +464,9 @@ runner**, only a new implementation and its registration in a manifest.
   Identical records are idempotent (same content address = same observation).
 - **Derived indexes** (vector index, graph, caches) are rebuildable from the log and are
   never authoritative.
+- **Semantic indexes**: an `IndexManifest` record, its source `MemoryState` record,
+  and a raw vector blob (kind `IndexVectors`, little-endian float32, row-major), all in
+  the artifact store.
 - **Artifacts** (`artifacts.ArtifactStore`) live under a local, git-ignored `var/`
   directory: `objects/<hh>/<sha256 rest>` (read-only files, written atomically, re-hashed
   on every read, never overwritten) plus an append-only `index.jsonl` of (digest, kind)
@@ -362,25 +477,46 @@ runner**, only a new implementation and its registration in a manifest.
 
 ## 7. Experimental Lifecycle
 
+The research loop (§1.1), executed by the experiment layer:
+
 ```
-experiences → formation → memory state → retrieval → response → provenance
-    → intervention → measurement → failure discovery → statistics → replay → report
+dataset → interventions → formation (→ consolidation) → memory state (→ index)
+  → retrieval → response → evaluation → comparison → longitudinal analysis → autopsy
 ```
 
-Every arrow is a recorded, replayable transformation.
+Every arrow is a recorded, replayable transformation; bracketed steps are roadmap.
 
 ## 8. Roadmap
+
+Rebaselined 2026-09-27 (§9). Phase detail — objective, capabilities, components,
+research questions, experiments, artifacts, validation criteria, dependencies and
+deferrals — is in [ROADMAP.md](ROADMAP.md).
 
 | Phase | Scope | Exit criterion |
 |---|---|---|
 | 0 ✓ | Foundation: constitution, tooling, core records | CI green; invariants tested |
-| 1 ✓ | Operation log on SQLite; bitemporal state reconstruction ("state as of t") | Replay reproduces state bit-for-bit from the log |
-| 2 ✓ | Formation baselines + retrieval (lexical, recency); retrieval traces. Neural embeddings deferred (§9). | A response is traceable to exact version digests |
+| 1 ✓ | Operation log on SQLite; bitemporal state reconstruction | Replay reproduces state bit-for-bit from the log |
+| 2 ✓ | Formation baselines, retrieval (lexical, recency), traces | A response is traceable to exact version digests |
 | 3 ✓ | Experiment runner: manifests, seeds, datasets, interventions, artifact store | Re-running a manifest reproduces its artifacts |
 | 4 ✓ | Evaluation: metrics, interval estimates, paired tests, failure taxonomy | Baseline vs. intervention comparison with CIs |
-| 5 | Provenance graph & memory autopsy | Full autopsy of any stored response |
-| 6 | API + observatory UI | UI renders only stored evidence |
-| 7 | Report generation | Reports cite run/artifact digests for every claim |
+| 5 ◐ | Semantic memory and local embedding infrastructure | Index rebuilds reproduce vectors; neighbours trace to versions; core runs without neural deps |
+| 6 | Hybrid retrieval and explainable ranking | Rank reproducible from trace; policies compared with paired statistics |
+| 7 | Memory consolidation and abstraction | Every consolidated memory has lineage to all supporting experiences |
+| 8 | Provenance and semantic memory graph | Graph is a pure, reproducible function of stored artifacts |
+| 9 | Forgetting laboratory | Every forgotten memory reconstructible; retention measured with intervals |
+| 10 | Interference laboratory | Each generator parameter measurably moves its target property |
+| 11 | Contradiction and belief revision | Revision measured without equating newer with truer; collateral damage measured |
+| 12 | Source reliability and uncertainty | Separate, calibrated confidence components; no universal score |
+| 13 | Adaptive retrieval policies | Every adaptation a replayable event |
+| 14 | Memory contamination and adversarial experiments | Every attack-caused failure traces to an injected experience |
+| 15 | Long-horizon benchmark generation | Datasets reproducible from parameters with measured difficulty |
+| 16 | Large-scale longitudinal evaluation | Curves decomposable to per-probe observations |
+| 17 | Memory autopsy | Every autopsy link resolves to a verified artifact |
+| 18 | Experiment orchestration and parameter sweeps | Sweeps reproduce; resumption equals uninterrupted runs |
+| 19 | Advanced statistical and research analysis | Methods reproduce reference values; coverage checked |
+| 20 | Interactive research observatory and API | Every rendered number links to its artifact |
+| 21 | Reproducibility and research packaging | A bundle reproduces on a clean machine |
+| 22 | Final benchmark and scientific validation | Every reported answer reproducible from a published bundle |
 
 ## 9. Decision Log
 
@@ -417,3 +553,11 @@ Every arrow is a recorded, replayable transformation.
 | 2026-09-27 | Newcombe method 10 for paired differences. Rejected: paired Wald; method 8 (coverage dips at small n); bootstrap (resampling, unstable at small n). | Recommended by Newcombe; closed form; verified against the paper's Table III. |
 | 2026-09-27 | Exact McNemar with Holm within families, plus an underpowered flag. Rejected: chi-square McNemar (invalid for small discordant counts); Bonferroni (uniformly less powerful than Holm); unadjusted p-values. | Honest inference at small n: a result that cannot reach significance says so. |
 | 2026-09-27 | Evaluation records live in `evaluation.py`, not `core.py`. | They are derived interpretation (Principle 6), kept apart from the recorded history they judge. |
+| 2026-09-27 | Research scope rebaselined: a laboratory comparing memory architectures along the research loop (§1.1), with RQ1–RQ15 and layers L1–L15. Phases 1–4 are the substrate and are not changed. | Principles 7–9 added so the expansion cannot trade rigour for breadth. |
+| 2026-09-27 | Old roadmap phases 5–7 (graph + autopsy, API/UI, reports) are superseded by phases 8, 17, 20, 19/21. | Autopsy needs the graph, sources, consolidation and longitudinal data first; a UI needs something worth rendering. |
+| 2026-09-27 | Detailed roadmap lives in ROADMAP.md, bound by §8. | Keeps the constitution readable while every phase still has explicit objectives and validation criteria. |
+| 2026-09-27 | Reference embedder is signed character-n-gram feature hashing, labelled lexical-subword. Rejected: random vectors (no structure to test); a bundled neural model (download, size, cross-platform float drift in the core suite). | Deterministic on every platform (integer counts, one correctly rounded division) and honest about what it measures. |
+| 2026-09-27 | Vectors are stored as little-endian float32 in a separate artifact; search uses the stored values. Rejected: JSON floats (size); float64 (no benefit for comparison, larger); in-memory-only indexes (not auditable). | Compact, byte-exact, and the same results before and after reload. |
+| 2026-09-27 | The first index is exact brute-force cosine. Rejected: FAISS/HNSW now. | An exact reference must exist before approximate indexes can be validated against it; laptop scale does not need ANN yet. |
+| 2026-09-27 | Manifest fields are added only with defaults omitted from canonical form (I33), implemented with the first new degree of freedom. Rejected: adding optional fields now. | Adding fields naively would change every existing manifest digest and break Phase 3/4 reproducibility. |
+| 2026-09-27 | No neural dependency added in this slice. | The contract, identity and index lifecycle are the prerequisite; a neural adapter without them would be unauditable. |

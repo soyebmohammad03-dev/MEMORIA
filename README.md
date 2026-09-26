@@ -2,65 +2,76 @@
 
 **Long-Horizon Memory Intelligence & Reliability Observatory**
 
-MEMORIA is a research platform for experimentally studying how AI systems form, store,
-retrieve, update, contradict, forget, contaminate, and reconstruct information over long
-interaction horizons.
+MEMORIA is an experimental laboratory and observatory for studying the formation,
+representation, consolidation, retrieval, revision, forgetting, interference,
+contamination, provenance and reliability of artificial memory over long interaction
+horizons.
 
 > What actually happens to an AI system's memory as experiences accumulate, change,
 > conflict, and disappear over time?
 
 MEMORIA is not a chatbot memory library. It treats a memory system as the *subject* of
-controlled experiments. It feeds the subject experiences, applies interventions, and
-records every transformation with provenance, so any result can be replayed and traced
-back to its sources.
+controlled experiments: it feeds the subject experiences, applies interventions, and
+records every transformation with provenance, so any result can be replayed, measured
+with its uncertainty, and traced back to its sources. The goal is to compare memory
+architectures and policies scientifically — for example, what becomes durable memory,
+when similar memories interfere, how contradictions revise beliefs, how resilient memory
+is to contamination, and exactly why a memory influenced an answer. The full research
+questions (RQ1–RQ15), target architecture and staged roadmap to Phase 22 are in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Status
 
-**Phase 4 complete: evaluation and failure analysis.** What exists today:
+**Phases 1–4 complete; Phase 5 in progress (slice 1).** What exists today:
 
-- The project constitution and architecture ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md))
 - **Memory history** (`core`, `store`): content-addressed, immutable, bitemporal records;
   create / update / correct / forget; an append-only, verified SQLite log
 - **Formation and retrieval** (`formation`, `retrieval`): `episodic-v1` and
-  `statement-v1` policies with recorded decisions; BM25 and recency retrieval with full
+  `statement-v1` policies with recorded decisions; BM25 and recency retrieval with
   per-candidate evidence; an extractive responder that abstains without evidence
 - **Experiments** (`interventions`, `artifacts`, `experiments`, `scenarios`): seeded
-  `drop` / `delay` / `reorder` / `contaminate` / `inject` interventions, a write-once
-  artifact store, a manifest runner with a `reproduce` check, and datasets with
-  epistemic ground truth (`known` / `unknown` / `contested`)
+  interventions, a write-once artifact store, a manifest runner with a `reproduce` check,
+  and datasets with epistemic ground truth
 - **Evaluation** (`comparison`, `taxonomy`, `statistics`, `evaluation`): exact answer
-  readings (statement, assignment, natural-language mention); a provenance-based failure
-  taxonomy (stale, contaminated, correction failure, temporal error, contradiction,
-  wrong memory, forgotten recalled, missing memory, retrieval miss, unsupported, ...) with
-  the rule that fired and a retrieval-versus-memory locus; measurements that list their
-  probes; Wilson intervals; paired baseline-vs-treatment comparisons with Newcombe
-  intervals, exact McNemar tests, Holm adjustment and underpowered flags
+  readings, a provenance-based failure taxonomy with a retrieval-versus-memory locus,
+  measurements that list their probes, Wilson intervals, and paired comparisons with
+  Newcombe intervals, exact McNemar tests, Holm adjustment and underpowered flags
+- **Semantic memory infrastructure** (`embeddings`, `semantic`): an embedding contract
+  with recorded model identity, a deterministic reference embedder, and a verifiable
+  semantic index artifact with exact search
 
-No neural embeddings, LLM providers, provenance graph, API or UI exist yet. The roadmap
-is in §8 of the architecture document. This README describes only what is implemented.
+The reference embedder hashes character n-grams: it measures spelling similarity, not
+meaning, and exists so the infrastructure is testable without downloading a model. No
+neural embedder, semantic ranking signal, consolidation, memory graph, API or UI exists
+yet. This README describes only what is implemented.
 
 ```python
 from memoria.artifacts import ArtifactStore
-from memoria.evaluation import compare, evaluate
-from memoria.experiments import execute
-from memoria.scenarios import conditions, drifting_facts
+from memoria.embeddings import HashedNgramEmbedder
+from memoria.formation import EpisodicPolicy, form
+from memoria.scenarios import day, relocation_year
+from memoria.semantic import SemanticIndex
+from memoria.store import MemoryLog
 
 store = ArtifactStore("var/artifacts")
-dataset = store.put_record(drifting_facts(seed=7, keys=8, changes=8, probes_per_key=12))
-runs = conditions(dataset, "statement-v1")  # baseline, drop, delay, reorder, ...
+embedder = HashedNgramEmbedder(dimensions=256)  # identity: embedder.spec.digest
 
-baseline = evaluate(execute(runs["baseline"], store).digest, store)
-treated = evaluate(execute(runs["contaminate"], store).digest, store)
-comparison = compare(baseline.digest, treated.digest, store)  # one variable changed
+with MemoryLog(":memory:") as log:
+    for step in relocation_year().steps:
+        form(log, step.experience, EpisodicPolicy(), recorded_at=step.recorded_at)
+    state = log.state_as_of(valid_at=day(345), known_at=day(345))
 
-m = comparison.measure("known.correct")
-print(f"{m.baseline.estimate:.2f} -> {m.treatment.estimate:.2f} (n={len(m.pairs)})")
-print(f"difference {m.difference:+.3f}, 95% CI [{m.low:.3f}, {m.high:.3f}], p={m.p_value:.2g}")
-for t in comparison.transitions:  # which probes failed, and how
-    print(t.baseline.value, "->", t.treatment.value, len(t.probes))
+index = SemanticIndex.build(state, embedder, store)  # state, vectors, manifest stored
+same = SemanticIndex.load(store, index.digest, embedder)  # other embedders are refused
+same.verify(store, embedder)  # re-embeds the stored state; bytes must match
+for hit in same.search("employer Initech", 3, embedder):
+    print(hit.rank, hit.similarity, hit.memory_id, hit.version)  # version -> provenance
 ```
 
-## Research areas (planned)
+The Phase 4 evaluation workflow (run conditions, evaluate, compare with intervals) is
+shown in `memoria.scenarios.conditions` and `memoria.evaluation.compare`.
+
+## Research areas
 
 Memory formation · versioning & supersession · temporal validity · retrieval ·
 correction · contradiction detection · forgetting & decay · contamination ·
