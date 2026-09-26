@@ -53,7 +53,11 @@ def wilson(k: int, n: int, confidence: float) -> tuple[float, float] | None:
     p = k / n
     centre = (p + z * z / (2 * n)) / (1 + z * z / n)
     half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
-    return max(0.0, centre - half), min(1.0, centre + half)
+    # The bounds are exactly 0 at k = 0 and exactly 1 at k = n; do not leave that to
+    # floating-point cancellation, which differs in the last bit across platforms.
+    low = 0.0 if k == 0 else max(0.0, centre - half)
+    high = 1.0 if k == n else min(1.0, centre + half)
+    return low, high
 
 
 def mcnemar_exact(b: int, c: int) -> float:

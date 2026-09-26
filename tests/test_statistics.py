@@ -47,6 +47,8 @@ def test_wilson_edges() -> None:
             interval = wilson(k, n, 0.95)
             assert interval is not None
             assert 0 <= interval[0] <= k / n <= interval[1] <= 1
+            assert (interval[0] == 0.0) == (k == 0)  # exact, on every platform
+            assert (interval[1] == 1.0) == (k == n)
     wide, narrow = wilson(5, 10, 0.99), wilson(5, 10, 0.80)
     assert wide is not None
     assert narrow is not None
