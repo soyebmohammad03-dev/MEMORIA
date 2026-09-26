@@ -37,11 +37,22 @@ from memoria.store import MemoryLog
 
 t = lambda d: datetime(2026, 1, d, tzinfo=UTC)
 with MemoryLog(":memory:") as log:  # or a file path
-    said = log.append_experience(Experience(source="chat:1", content="I live in Paris.", occurred_at=t(1)))
-    v1 = MemoryVersion(memory_id="home", version=1, operation=Operation.CREATE, content="Paris",
-                       valid_from=t(1), recorded_at=t(1), derived_from=(said,))
+    said = log.append_experience(
+        Experience(source="chat:1", content="I live in Paris.", occurred_at=t(1))
+    )
+    v1 = MemoryVersion(
+        memory_id="home",
+        version=1,
+        operation=Operation.CREATE,
+        content="Paris",
+        valid_from=t(1),
+        recorded_at=t(1),
+        derived_from=(said,),
+    )
     log.append_version(v1)
-    log.append_version(v1.successor(Operation.UPDATE, content="Berlin", valid_from=t(20), recorded_at=t(28)))
+    log.append_version(
+        v1.successor(Operation.UPDATE, content="Berlin", valid_from=t(20), recorded_at=t(28))
+    )
     log.state_as_of(valid_at=t(25), known_at=t(27))  # Paris: the move was not yet known
     log.state_as_of(valid_at=t(25), known_at=t(28))  # Berlin: learned on day 28, true from day 20
 ```
