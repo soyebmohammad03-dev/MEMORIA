@@ -2,7 +2,7 @@
 
 Storage only. Every domain rule is enforced by :mod:`memoria.core`, so another backend
 (e.g. PostgreSQL) has to reproduce storage and append-only enforcement, not semantics.
-SQLite-specific parts: the guard triggers and ``PRAGMA user_version``.
+SQLite-specific parts: the guard triggers, savepoints and ``PRAGMA user_version``.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 from types import TracebackType
@@ -19,12 +19,29 @@ from typing import Self
 from pydantic import ValidationError
 
 from memoria import core
-from memoria.core import Experience, InvalidTransitionError, MemoryState, MemoryVersion, Record
+from memoria.core import (
+    Experience,
+    FormationDecision,
+    InvalidTransitionError,
+    MemoryState,
+    MemoryVersion,
+    Record,
+    Response,
+    RetrievalTrace,
+)
 
-SCHEMA_VERSION = 1
-_TABLES = ("experiences", "memory_versions")
-_SCHEMA = f"""
-BEGIN;
+SCHEMA_VERSION = 2
+
+
+def _guards(table: str) -> str:
+    return "".join(
+        f"CREATE TRIGGER {table}_no_{op.lower()} BEFORE {op} ON {table} "
+        f"BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END;\n"
+        for op in ("UPDATE", "DELETE")
+    )
+
+
+_SCHEMA_V1 = f"""
 CREATE TABLE experiences (
     seq INTEGER PRIMARY KEY,
     digest TEXT NOT NULL UNIQUE,
@@ -38,17 +55,36 @@ CREATE TABLE memory_versions (
     body TEXT NOT NULL,
     UNIQUE (memory_id, version)
 );
-{
-    "".join(
-        f"CREATE TRIGGER {t}_no_{op.lower()} BEFORE {op} ON {t} "
-        f"BEGIN SELECT RAISE(ABORT, '{t} is append-only'); END;\n"
-        for t in _TABLES
-        for op in ("UPDATE", "DELETE")
-    )
+{_guards("experiences")}{_guards("memory_versions")}"""
+
+# v2: derived observations (formation decisions, retrieval traces, responses).
+# `mark` is the record's time coordinate in integer microseconds since the epoch:
+# recorded_at for decisions, the query's known_at for traces, NULL for responses.
+_SCHEMA_V2 = f"""
+CREATE TABLE records (
+    seq INTEGER PRIMARY KEY,
+    digest TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    mark INTEGER,
+    body TEXT NOT NULL
+);
+{_guards("records")}"""
+
+LogRecord = FormationDecision | RetrievalTrace | Response
+_KINDS: dict[type[Record], str] = {
+    FormationDecision: "formation_decision",
+    RetrievalTrace: "retrieval_trace",
+    Response: "response",
 }
-PRAGMA user_version = {SCHEMA_VERSION};
-COMMIT;
-"""
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _mark(t: datetime) -> int:
+    return (t - _EPOCH) // timedelta(microseconds=1)
+
+
+def _unmark(m: int | None) -> datetime | None:
+    return None if m is None else _EPOCH + timedelta(microseconds=m)
 
 
 class LogIntegrityError(RuntimeError):
@@ -69,22 +105,30 @@ def _load[R: Record](model: type[R], rows: Iterable[tuple[str, str]]) -> list[R]
 
 
 class MemoryLog:
-    """Append-only log of experiences and memory versions, validated on every append.
+    """Append-only log of experiences, memory versions and derived records.
 
-    Record time is the log's own axis: versions must be appended in non-decreasing
-    ``recorded_at`` order. Nothing is ever updated or deleted.
+    Every append is validated. Record time is the log's own axis: versions and
+    formation decisions are appended in non-decreasing record time, and strictly
+    after the ``known_at`` of any stored retrieval, whose view of the past is thereby
+    frozen. Nothing is ever updated or deleted.
     """
 
     # ponytail: single-writer design; appends serialise on SQLite's write lock.
 
     def __init__(self, path: str | Path) -> None:
         self._db = sqlite3.connect(path, isolation_level=None)  # transactions are explicit
+        self._depth = 0
         found = self._db.execute("PRAGMA user_version").fetchone()[0]
         if found == 0 and not self._db.execute("SELECT 1 FROM sqlite_master").fetchone():
-            self._db.executescript(_SCHEMA)
-        elif found != SCHEMA_VERSION:
+            script = _SCHEMA_V1 + _SCHEMA_V2
+        elif found == 1:
+            script = _SCHEMA_V2  # additive migration; existing rows are untouched
+        elif found == SCHEMA_VERSION:
+            return
+        else:
             self._db.close()
             raise LogIntegrityError(f"{path}: not a MEMORIA log with schema v{SCHEMA_VERSION}")
+        self._db.executescript(f"BEGIN;\n{script}PRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;")
 
     def __enter__(self) -> Self:
         return self
@@ -98,20 +142,32 @@ class MemoryLog:
         self._db.close()
 
     @contextmanager
-    def _write(self) -> Iterator[sqlite3.Connection]:
-        self._db.execute("BEGIN IMMEDIATE")
+    def transaction(self) -> Iterator[None]:
+        """An atomic unit of work. Nests via savepoints; an error undoes its level only."""
+        depth = self._depth
+        self._db.execute(f"SAVEPOINT s{depth}" if depth else "BEGIN IMMEDIATE")
+        self._depth += 1
         try:
-            yield self._db
+            yield
         except BaseException:
-            self._db.execute("ROLLBACK")
+            if depth:
+                self._db.execute(f"ROLLBACK TO s{depth}")
+                self._db.execute(f"RELEASE s{depth}")
+            else:
+                self._db.execute("ROLLBACK")
             raise
-        self._db.execute("COMMIT")
+        else:
+            self._db.execute(f"RELEASE s{depth}" if depth else "COMMIT")
+        finally:
+            self._depth = depth
+
+    # --- appends ----------------------------------------------------------------------
 
     def append_experience(self, experience: Experience) -> str:
         """Idempotent: an identical experience is the same content-addressed record."""
         digest = experience.digest
-        with self._write() as db:
-            db.execute(
+        with self.transaction():
+            self._db.execute(
                 "INSERT OR IGNORE INTO experiences (digest, body) VALUES (?, ?)",
                 (digest, experience.canonical()),
             )
@@ -119,20 +175,93 @@ class MemoryLog:
 
     def append_version(self, version: MemoryVersion) -> str:
         """Append after validating it against the memory's full history and its citations."""
-        with self._write():
+        with self.transaction():
             core.beliefs([*self.history(version.memory_id), version])
-            last = self._versions("ORDER BY seq DESC LIMIT 1")
-            if last and version.recorded_at < last[0].recorded_at:
-                raise InvalidTransitionError(
-                    f"memory {version.memory_id!r} v{version.version}: recorded_at precedes "
-                    "the latest entry in the log; record time cannot go backwards"
-                )
+            self._check_record_time(version.recorded_at, f"memory {version.memory_id!r}")
             core.check_citations(version, self._experiences(version.derived_from))
             self._db.execute(
                 "INSERT INTO memory_versions (digest, memory_id, version, body) VALUES (?,?,?,?)",
                 (version.digest, version.memory_id, version.version, version.canonical()),
             )
         return version.digest
+
+    def append_record(self, record: LogRecord) -> str:
+        """Append a decision, trace or response after checking every reference it makes.
+
+        Idempotent: an identical record is the same content-addressed observation.
+        """
+        digest = record.digest
+        with self.transaction():
+            if self._db.execute("SELECT 1 FROM records WHERE digest = ?", (digest,)).fetchone():
+                return digest
+            mark: int | None = None
+            match record:
+                case FormationDecision():
+                    self._check_decision(record)
+                    self._check_record_time(record.recorded_at, "formation decision")
+                    mark = _mark(record.recorded_at)
+                case RetrievalTrace():
+                    q = record.query
+                    core.check_trace(
+                        record, self.state_as_of(valid_at=q.valid_at, known_at=q.known_at)
+                    )
+                    mark = _mark(q.known_at)
+                case Response():
+                    trace = self.record(RetrievalTrace, record.trace)
+                    if trace is None:
+                        raise InvalidTransitionError(f"response cites unknown trace {record.trace}")
+                    core.check_response(record, trace)
+            self._db.execute(
+                "INSERT INTO records (digest, kind, mark, body) VALUES (?, ?, ?, ?)",
+                (digest, _KINDS[type(record)], mark, record.canonical()),
+            )
+        return digest
+
+    def _check_record_time(self, at: datetime, what: str) -> None:
+        floor = max(
+            (t for t in (self._last_version_time(), self._max_mark("formation_decision")) if t),
+            default=None,
+        )
+        if floor and at < floor:
+            raise InvalidTransitionError(
+                f"{what}: recorded_at precedes the latest entry in the log; "
+                "record time cannot go backwards"
+            )
+        frozen = self._max_mark("retrieval_trace")
+        if frozen and at <= frozen:
+            raise InvalidTransitionError(
+                f"{what}: recorded_at must be after {frozen.isoformat()}, the known_at of a "
+                "stored retrieval; the state it observed is frozen"
+            )
+
+    def _check_decision(self, d: FormationDecision) -> None:
+        experience = self.experience(d.experience)
+        if experience is None:
+            raise InvalidTransitionError(f"decision cites unknown experience {d.experience}")
+        refs = {"version": d.version, "basis": d.basis}
+        found = {k: self.version(v) if v else None for k, v in refs.items()}
+        for k, v in refs.items():
+            if v and found[k] is None:
+                raise InvalidTransitionError(f"decision cites unknown {k} {v}")
+        core.check_decision(d, experience, found["version"], found["basis"])
+        first = self._db.execute(
+            "SELECT digest, body FROM records WHERE kind = ? ORDER BY seq LIMIT 1",
+            (_KINDS[FormationDecision],),
+        ).fetchall()
+        if first and (policy := _load(FormationDecision, first)[0].policy) != d.policy:
+            raise InvalidTransitionError(
+                f"decision by policy {d.policy!r}: this log is formed by {policy!r}"
+            )
+
+    # --- reads --------------------------------------------------------------------------
+
+    def _last_version_time(self) -> datetime | None:
+        last = self._versions("ORDER BY seq DESC LIMIT 1")
+        return last[0].recorded_at if last else None
+
+    def _max_mark(self, kind: str) -> datetime | None:
+        row = self._db.execute("SELECT MAX(mark) FROM records WHERE kind = ?", (kind,)).fetchone()
+        return _unmark(row[0])
 
     def _versions(
         self, clause: str = "ORDER BY seq", args: tuple[object, ...] = ()
@@ -156,13 +285,35 @@ class MemoryLog:
         """All experiences, in append order."""
         return list(self._experiences().values())
 
+    def experience(self, digest: str) -> Experience | None:
+        return self._experiences([digest]).get(digest)
+
     def versions(self) -> list[MemoryVersion]:
         """All memory versions, in append (record-time) order."""
         return self._versions()
 
+    def version(self, digest: str) -> MemoryVersion | None:
+        found = self._versions("WHERE digest = ?", (digest,))
+        return found[0] if found else None
+
     def history(self, memory_id: str) -> list[MemoryVersion]:
         """One memory's full version chain, oldest first, including any tombstone."""
         return self._versions("WHERE memory_id = ? ORDER BY version", (memory_id,))
+
+    def records[R: LogRecord](self, model: type[R]) -> list[R]:
+        """All records of one kind, in append order."""
+        rows = self._db.execute(
+            "SELECT digest, body FROM records WHERE kind = ? ORDER BY seq", (_KINDS[model],)
+        )
+        return _load(model, rows)
+
+    def record[R: LogRecord](self, model: type[R], digest: str) -> R | None:
+        rows = self._db.execute(
+            "SELECT digest, body FROM records WHERE kind = ? AND digest = ?",
+            (_KINDS[model], digest),
+        )
+        found = _load(model, rows)
+        return found[0] if found else None
 
     def state_as_of(self, *, valid_at: datetime, known_at: datetime) -> MemoryState:
         # ponytail: full-log scan per query; add snapshots/indexes when logs outgrow memory.
@@ -175,16 +326,32 @@ class MemoryLog:
         """
         experiences = self._experiences()
         versions = self.versions()
-        for earlier, later in pairwise(versions):
-            if later.recorded_at < earlier.recorded_at:
-                raise LogIntegrityError(f"record time goes backwards at {later.digest}")
-        for v in versions:
-            try:
+        decisions = self.records(FormationDecision)
+        for kind, times in (
+            ("version", [v.recorded_at for v in versions]),
+            ("decision", [d.recorded_at for d in decisions]),
+        ):
+            for earlier, later in pairwise(times):
+                if later < earlier:
+                    raise LogIntegrityError(f"{kind} record time goes backwards at {later}")
+        try:
+            for v in versions:
                 core.check_citations(v, experiences)
-            except InvalidTransitionError as e:
-                raise LogIntegrityError(str(e)) from e
-        for memory_id in sorted({v.memory_id for v in versions}):
-            try:
+            for memory_id in sorted({v.memory_id for v in versions}):
                 core.beliefs(self.history(memory_id))
-            except InvalidTransitionError as e:
-                raise LogIntegrityError(str(e)) from e
+            if len({d.policy for d in decisions}) > 1:
+                raise InvalidTransitionError("log contains decisions from more than one policy")
+            for d in decisions:
+                self._check_decision(d)
+            traces = {t.digest: t for t in self.records(RetrievalTrace)}
+            for t in traces.values():
+                q = t.query
+                core.check_trace(
+                    t, core.state_as_of(versions, valid_at=q.valid_at, known_at=q.known_at)
+                )
+            for r in self.records(Response):
+                if r.trace not in traces:
+                    raise InvalidTransitionError(f"response cites unknown trace {r.trace}")
+                core.check_response(r, traces[r.trace])
+        except InvalidTransitionError as e:
+            raise LogIntegrityError(str(e)) from e

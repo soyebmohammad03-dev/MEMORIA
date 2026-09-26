@@ -248,3 +248,270 @@ def state_as_of(
         if b.holds_at(valid_at)
     ]
     return MemoryState(valid_at=valid_at, known_at=known_at, memories=tuple(held))
+
+
+# --- formation decisions ----------------------------------------------------------------
+
+
+class FormationReason(StrEnum):
+    """Why a formation policy did (or did not) change memory. A closed vocabulary."""
+
+    NEW_KEY = "new_key"  # CREATE: nothing was known about the key
+    RELEARNED = "relearned"  # CREATE: the key's previous memory was forgotten
+    NEW_EPISODE = "new_episode"  # CREATE: episodic policy stores every experience
+    VALUE_CHANGED = "value_changed"  # UPDATE: a newer value for a live memory
+    EXPLICIT_CORRECTION = "explicit_correction"  # CORRECT
+    EXPLICIT_FORGET = "explicit_forget"  # FORGET
+    DUPLICATE_EXPERIENCE = "duplicate_experience"  # skip: this exact experience was seen
+    REDUNDANT = "redundant"  # skip: asserts what is already believed
+    STALE = "stale"  # skip: predates the current belief
+    CONFLICTING = "conflicting"  # skip: contradicts a belief asserted for the same instant
+    UNKNOWN_KEY = "unknown_key"  # skip: correct/forget with no live memory
+    UNPARSED = "unparsed"  # skip: not a statement the policy understands
+
+    @property
+    def operation(self) -> Operation | None:
+        return _REASON_OPERATION.get(self)
+
+
+_REASON_OPERATION = {
+    FormationReason.NEW_KEY: Operation.CREATE,
+    FormationReason.RELEARNED: Operation.CREATE,
+    FormationReason.NEW_EPISODE: Operation.CREATE,
+    FormationReason.VALUE_CHANGED: Operation.UPDATE,
+    FormationReason.EXPLICIT_CORRECTION: Operation.CORRECT,
+    FormationReason.EXPLICIT_FORGET: Operation.FORGET,
+}
+# Reasons that are only meaningful relative to an existing version (the decision's basis).
+_NEEDS_BASIS = frozenset(
+    {
+        FormationReason.RELEARNED,
+        FormationReason.VALUE_CHANGED,
+        FormationReason.EXPLICIT_CORRECTION,
+        FormationReason.EXPLICIT_FORGET,
+        FormationReason.REDUNDANT,
+        FormationReason.STALE,
+        FormationReason.CONFLICTING,
+    }
+)
+_NO_BASIS = frozenset(
+    {
+        FormationReason.NEW_KEY,
+        FormationReason.NEW_EPISODE,
+        FormationReason.DUPLICATE_EXPERIENCE,
+        FormationReason.UNPARSED,
+    }
+)
+
+
+class FormationDecision(Record):
+    """The recorded outcome of processing one experience, including decisions to do nothing.
+
+    ``basis`` is the version the decision was judged against (e.g. the belief an UPDATE
+    supersedes, or the tombstone a RELEARNED memory follows); ``version`` is the version
+    the decision appended, if any. UNKNOWN_KEY may cite a tombstone as basis.
+    """
+
+    experience: Digest
+    policy: str = Field(min_length=1)
+    reason: FormationReason
+    memory_id: str | None = Field(default=None, min_length=1)
+    basis: Digest | None = None
+    version: Digest | None = None
+    recorded_at: UTCDatetime
+
+    @property
+    def operation(self) -> Operation | None:
+        return self.reason.operation
+
+    @model_validator(mode="after")
+    def _check_invariants(self) -> Self:
+        if (self.version is None) != (self.operation is None):
+            raise ValueError(f"{self.reason.value}: version must be present iff memory changes")
+        if self.reason in _NEEDS_BASIS and self.basis is None:
+            raise ValueError(f"{self.reason.value} requires a basis version")
+        if self.reason in _NO_BASIS and self.basis is not None:
+            raise ValueError(f"{self.reason.value} cannot have a basis version")
+        if (self.memory_id is None) != (self.basis is None and self.version is None):
+            raise ValueError("memory_id is required iff the decision targets a memory")
+        return self
+
+
+def check_decision(
+    decision: FormationDecision,
+    experience: Experience,
+    version: MemoryVersion | None,
+    basis: MemoryVersion | None,
+) -> None:
+    """Cross-record consistency of a decision with the records it references."""
+    where = f"decision on {decision.experience}"
+    if experience.digest != decision.experience:
+        raise InvalidTransitionError(f"{where}: experience does not match")
+    if decision.recorded_at < experience.occurred_at:
+        raise InvalidTransitionError(f"{where}: recorded before the experience occurred")
+    if (basis is None) != (decision.basis is None) or (basis and basis.digest != decision.basis):
+        raise InvalidTransitionError(f"{where}: basis does not match")
+    if (version is None) != (decision.version is None):
+        raise InvalidTransitionError(f"{where}: version does not match")
+    if version is None:
+        return
+    if version.digest != decision.version:
+        raise InvalidTransitionError(f"{where}: version does not match")
+    if version.operation is not decision.operation or version.memory_id != decision.memory_id:
+        raise InvalidTransitionError(f"{where}: version is not the recorded operation")
+    if version.recorded_at != decision.recorded_at:
+        raise InvalidTransitionError(f"{where}: version and decision record times differ")
+    if decision.experience not in version.derived_from:
+        raise InvalidTransitionError(f"{where}: version does not cite the experience")
+    if version.operation is not Operation.CREATE and version.supersedes != decision.basis:
+        raise InvalidTransitionError(f"{where}: version does not supersede the basis")
+
+
+# --- retrieval traces and responses -------------------------------------------------------
+
+Scalar = int | float | str
+
+
+def _named_inputs(pairs: tuple[tuple[str, Scalar], ...]) -> tuple[tuple[str, Scalar], ...]:
+    names = [name for name, _ in pairs]
+    if len(set(names)) != len(names):
+        raise ValueError("input names must be unique")
+    return tuple(sorted(pairs, key=lambda p: p[0]))
+
+
+# Named raw inputs in canonical (name-sorted) order.
+Inputs = Annotated[tuple[tuple[str, Scalar], ...], AfterValidator(_named_inputs)]
+Score = Annotated[float, Field(ge=0, allow_inf_nan=False)]
+
+
+def quantize(x: float) -> float:
+    """Round a derived score so recorded values do not depend on last-bit libm differences."""
+    return round(x, 12)
+
+
+class Query(Record):
+    """A retrieval request, pinned to both time axes so it is reproducible."""
+
+    text: str
+    valid_at: UTCDatetime
+    known_at: UTCDatetime
+    limit: int = Field(ge=1)
+
+
+class SignalSpec(Record):
+    name: str = Field(min_length=1)
+    weight: float = Field(gt=0, allow_inf_nan=False)
+    params: Inputs = ()
+
+
+class RetrieverSpec(Record):
+    """Everything that determines ranking: signals, their parameters and weights, the gate."""
+
+    name: str = Field(min_length=1)
+    gate: str  # a candidate is eligible iff this signal scores > 0
+    signals: tuple[SignalSpec, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_invariants(self) -> Self:
+        names = [s.name for s in self.signals]
+        if len(set(names)) != len(names):
+            raise ValueError("signal names must be unique")
+        if self.gate not in names:
+            raise ValueError(f"gate {self.gate!r} is not one of the signals")
+        return self
+
+
+class SignalEvidence(Record):
+    """One signal's score for one candidate, with the named raw inputs that produced it."""
+
+    signal: str
+    score: Score
+    inputs: Inputs = ()
+
+
+class Candidate(Record):
+    """A memory from the queried state, with every signal's evidence and its combined total."""
+
+    version: Digest
+    memory_id: str
+    eligible: bool
+    total: Score
+    signals: tuple[SignalEvidence, ...]
+
+
+def combine(spec: RetrieverSpec, signals: Sequence[SignalEvidence]) -> tuple[bool, float]:
+    """(eligible, total): the gate decides eligibility; total is the weighted sum."""
+    by_name = {s.signal: s.score for s in signals}
+    total = quantize(sum(s.weight * by_name[s.name] for s in spec.signals))
+    return by_name[spec.gate] > 0, total
+
+
+def rank_key(c: Candidate) -> tuple[bool, float, str]:
+    """Eligible first, then higher total, then memory_id: a total, deterministic order."""
+    return (not c.eligible, -c.total, c.memory_id)
+
+
+class RetrievalTrace(Record):
+    """A complete, self-checking record of one retrieval.
+
+    Every memory in the queried state appears as a candidate, so the trace answers
+    why each memory was or was not returned. The validator re-derives eligibility,
+    totals, ranking and selection, so an internally inconsistent trace cannot exist.
+    """
+
+    query: Query
+    retriever: RetrieverSpec
+    state: Digest  # digest of the MemoryState at (query.valid_at, query.known_at)
+    candidates: tuple[Candidate, ...]  # ranked
+    selected: tuple[Digest, ...]
+
+    @model_validator(mode="after")
+    def _check_invariants(self) -> Self:
+        names = [s.name for s in self.retriever.signals]
+        for c in self.candidates:
+            if [s.signal for s in c.signals] != names:
+                raise ValueError(f"candidate {c.memory_id}: signals do not match the retriever")
+            if combine(self.retriever, c.signals) != (c.eligible, c.total):
+                raise ValueError(f"candidate {c.memory_id}: eligibility/total not reproducible")
+        if len({c.memory_id for c in self.candidates}) != len(self.candidates):
+            raise ValueError("a memory appears more than once among candidates")
+        if list(self.candidates) != sorted(self.candidates, key=rank_key):
+            raise ValueError("candidates are not in rank order")
+        eligible = [c.version for c in self.candidates if c.eligible]
+        if self.selected != tuple(eligible[: self.query.limit]):
+            raise ValueError("selected is not the top eligible candidates")
+        return self
+
+
+def check_trace(trace: RetrievalTrace, state: MemoryState) -> None:
+    """The trace must describe exactly the state it claims to have queried."""
+    if (state.valid_at, state.known_at) != (trace.query.valid_at, trace.query.known_at):
+        raise InvalidTransitionError("trace: state is not at the query's time coordinates")
+    if state.digest != trace.state:
+        raise InvalidTransitionError("trace: state digest does not match the log")
+    if sorted(c.version for c in trace.candidates) != sorted(m.digest for m in state.memories):
+        raise InvalidTransitionError("trace: candidates are not exactly the state's memories")
+
+
+class Response(Record):
+    """An answer and the exact memory versions it relied on. ``output=None`` = abstained."""
+
+    trace: Digest
+    responder: str = Field(min_length=1)
+    output: str | None
+    cited: tuple[Digest, ...] = ()
+
+    @model_validator(mode="after")
+    def _check_invariants(self) -> Self:
+        if (self.output is None) != (not self.cited):
+            raise ValueError("a response cites evidence iff it answers")
+        if len(set(self.cited)) != len(self.cited):
+            raise ValueError("cited versions must be unique")
+        return self
+
+
+def check_response(response: Response, trace: RetrievalTrace) -> None:
+    if response.trace != trace.digest:
+        raise InvalidTransitionError("response: trace does not match")
+    if not set(response.cited) <= set(trace.selected):
+        raise InvalidTransitionError("response: cites a version the retrieval did not select")

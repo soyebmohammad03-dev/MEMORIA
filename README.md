@@ -16,45 +16,47 @@ back to its sources.
 
 ## Status
 
-**Phase 1 complete: memory history.** What exists today:
+**Phase 2 complete: formation, retrieval and traceable responses.** What exists today:
 
 - The project constitution and architecture ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md))
-- `memoria.core`: content-addressed, immutable `Experience` and bitemporal, hash-linked
-  `MemoryVersion` records; explicit create / update / correct / forget semantics; a pure
-  fold answering "what did the system believe at record time *k* about valid time *t*?"
-- `memoria.store`: an append-only SQLite operation log that validates every append,
-  rejects mutation at the database level, verifies digests on read, and replays
-  deterministically
-- Tests, strict type checking, linting, and CI
+- `memoria.core`: content-addressed, immutable records: experiences, bitemporal
+  hash-linked memory versions with create / update / correct / forget semantics, formation
+  decisions, queries, retrieval traces and responses, each with enforced invariants
+- `memoria.store`: an append-only SQLite log that validates every append and every
+  cross-record reference, rejects mutation at the database level, verifies digests on
+  read, and replays deterministically
+- `memoria.formation`: two deterministic baseline policies (`episodic-v1` stores raw
+  episodes; `statement-v1` maintains keyed memories from an explicit statement language)
+  whose every decision, including "change nothing", is recorded with a reason
+- `memoria.retrieval`: BM25 and recency signals with per-candidate evidence, a
+  fully-recorded ranking rule, and an extractive responder that abstains without evidence
+- `memoria.scenarios`: a deterministic year-long experience stream covering updates, late
+  reports, corrections, forgetting, relearning, conflicts, duplicates and noise
 
-No formation, retrieval, experiments, metrics, API, or UI exist yet. The roadmap is in
-§8 of the architecture document. This README describes only what is implemented.
+No neural embeddings, LLM providers, experiment runner, metrics, API or UI exist yet.
+The roadmap is in §8 of the architecture document. This README describes only what is
+implemented.
 
 ```python
-from datetime import UTC, datetime
-from memoria.core import Experience, MemoryVersion, Operation
+from memoria.core import Query
+from memoria.formation import StatementPolicy, form
+from memoria.retrieval import answer, lexical
+from memoria.scenarios import day, relocation_year
 from memoria.store import MemoryLog
 
-t = lambda d: datetime(2026, 1, d, tzinfo=UTC)
 with MemoryLog(":memory:") as log:  # or a file path
-    said = log.append_experience(
-        Experience(source="chat:1", content="I live in Paris.", occurred_at=t(1))
-    )
-    v1 = MemoryVersion(
-        memory_id="home",
-        version=1,
-        operation=Operation.CREATE,
-        content="Paris",
-        valid_from=t(1),
-        recorded_at=t(1),
-        derived_from=(said,),
-    )
-    log.append_version(v1)
-    log.append_version(
-        v1.successor(Operation.UPDATE, content="Berlin", valid_from=t(20), recorded_at=t(28))
-    )
-    log.state_as_of(valid_at=t(25), known_at=t(27))  # Paris: the move was not yet known
-    log.state_as_of(valid_at=t(25), known_at=t(28))  # Berlin: learned on day 28, true from day 20
+    for step in relocation_year():
+        form(log, step.experience, StatementPolicy(), recorded_at=step.recorded_at)
+
+    # The user moved on day 55; the system learned it on day 60.
+    for known in (59, 60):
+        q = Query(text="where is home", valid_at=day(57), known_at=day(known), limit=1)
+        trace, response = answer(log, lexical(), q)
+        print(known, response.output, response.cited)  # 59: Paris, 60: Berlin
+
+    top = trace.candidates[0]  # why it was chosen: every signal's score and raw inputs
+    print(top.total, top.signals[0].inputs)
+    print(log.version(response.cited[0]).derived_from)  # the experience(s) behind it
 ```
 
 ## Research areas (planned)

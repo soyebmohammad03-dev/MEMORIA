@@ -49,6 +49,11 @@ These are enforced in code and tests, not by convention.
 | I11 | Record time never goes backwards, within a chain or across the log. |
 | I12 | A version may only cite experiences already in the log that occurred at or before its `recorded_at`. |
 | I13 | Stored records are re-verified against their digest on every read; mismatch is an error, never repaired silently. |
+| I14 | A stored retrieval freezes the past: later versions and decisions must be recorded strictly after its `known_at`, so the state it observed can always be recomputed. |
+| I15 | Every formation outcome is recorded, including decisions to change nothing, with the policy, a reason from a closed vocabulary, and the version it was judged against. |
+| I16 | A retrieval trace lists every memory of the queried state and re-derives its own eligibility, totals, ranking and selection; the state it names must be the log's state at its coordinates. |
+| I17 | A response cites only versions its trace selected, and cites evidence iff it answers. |
+| I18 | Derived scores are quantised (12 decimal places) before recording, so digests do not depend on last-bit floating-point differences between platforms. |
 
 Tooling standard: Python ≥3.12, Pydantic v2, `mypy --strict`, Ruff, pytest with warnings
 as errors, `uv` with a committed lockfile, CI on every push.
@@ -62,8 +67,10 @@ as errors, `uv` with a committed lockfile, CI on every push.
 | **Operation** | Why a version exists: `create`, `update` (world changed), `correct` (prior was wrong), `forget` (tombstone). | `core.py` |
 | **Belief** | A version plus the validity interval it effectively holds after later operations (§4.1). | `core.py` |
 | **Memory state** | The versions believed at record time *k* to hold at valid time *t*. A pure fold over the log, with its own digest. | `core.py`, `store.py` |
-| **Retrieval trace** | Query, backend, candidates, scores, and selected version digests. | Phase 2 |
-| **Response** | Model output plus the retrieval trace and prompt that produced it. | Phase 2 |
+| **Formation decision** | The recorded outcome of one experience under one policy: reason, target memory, basis version, appended version (if any). | `core.py` |
+| **Query** | Retrieval text pinned to both time axes (`valid_at`, `known_at`) and a result limit. | `core.py` |
+| **Retrieval trace** | Query, full retriever spec, state digest, every candidate with per-signal scores and raw inputs, and the selected version digests. | `core.py` |
+| **Response** | An answer (or abstention), the responder that produced it, and the exact version digests it cites. A prompt is added when an LLM responder exists. | `core.py` |
 | **Intervention** | A controlled perturbation: inject contradiction, contaminate, delete, delay, reorder. | Phase 3 |
 | **Run manifest** | Everything that determines a run (see Principle 2). Its hash is the run ID. | Phase 3 |
 | **Measurement** | A metric value with n, interval, and the run/artifact digests it came from. | Phase 4 |
@@ -90,6 +97,62 @@ Each belief's effective end is the earlier of its own `valid_to` and the next be
 Known limits: `correct` targets only the latest belief, and re-learning a forgotten fact
 creates a new memory rather than reviving the tombstoned one.
 
+### 4.2 Formation semantics
+
+`formation.form(log, experience, policy, recorded_at=k)` atomically appends the
+experience, asks the policy for a decision, appends the resulting version (if any), and
+appends the decision. An experience already in the log yields `duplicate_experience`
+without consulting the policy. A log is formed by exactly one policy.
+
+Policies are pure functions of (experience, read-only history, `k`). Two baselines exist:
+
+- **`episodic-v1`** stores each experience verbatim as memory `episode:<digest>`, valid
+  from when it occurred. Nothing is superseded; contradictions coexist.
+- **`statement-v1`** maintains one memory per key from an explicit statement language —
+  `set <key> = <value>`, `correct <key> = <value>`, `forget <key>` (lowercase verbs;
+  keys `[a-z0-9_.-]+`; one statement per experience). It does not interpret natural
+  language. Memory content is `<key> = <value>`. For a statement occurring at *t* against
+  the live memory's current belief `head`:
+
+| Condition (checked in order) | Reason | Operation |
+|---|---|---|
+| not a statement | `unparsed` | — |
+| no live memory, `set` | `new_key`, or `relearned` (new memory `key#n`, basis = tombstone) | create, valid from *t* |
+| no live memory, `correct`/`forget` | `unknown_key` | — |
+| *t* < `head.valid_from` | `stale` | — |
+| `forget` | `explicit_forget` | forget |
+| same content as `head` | `redundant` | — |
+| *t* = `head.valid_from` | `conflicting` (first recorded wins) | — |
+| `set` | `value_changed` | update, valid from *t* |
+| `correct` | `explicit_correction` | correct, over `head`'s interval |
+
+Known limits: late-arriving older facts are recorded as `stale` rather than inserted into
+the past; same-instant conflicts are recorded, not resolved.
+
+### 4.3 Retrieval semantics
+
+A `Retriever` ranks the memories of `state_as_of(query.valid_at, query.known_at)`. Each
+**signal** scores every memory and records named raw inputs. A candidate is eligible iff
+the **gate** signal scores > 0; its total is Σ weight × score; candidates are ordered by
+(eligible first, total descending, `memory_id` ascending) and the first `limit` eligible
+are selected. Signals:
+
+- **`bm25`**: Okapi BM25 (k1 = 1.2, b = 0.75 by default) over case-folded Unicode word
+  tokens, no stemming or stop words, idf = ln(1 + (N − df + 0.5)/(df + 0.5)) with corpus
+  statistics from the queried state; query terms de-duplicated. Inputs: per matched term
+  tf, df, idf and contribution; document length, average length, N.
+- **`recency`**: 0.5^(age/half-life) in days, on the record axis (age since recorded, as
+  of `known_at`) or the valid axis (age since the belief began, as of `valid_at`).
+
+Presets: `lexical()` = `bm25-v1` (BM25 only); `lexical_recency()` = `bm25+recency-v1`
+(BM25 gate, recency weight 0.5, half-life 30 days). Weights are recorded in every trace;
+they are baselines, not tuned values. The `extractive-top1-v1` responder answers with
+the top selected memory's content verbatim and abstains when nothing is selected.
+
+Known limits: tie-breaking by `memory_id` is deterministic but semantically arbitrary
+(the episodic baseline demonstrably returns a stale report on a three-way tie); no
+dense/semantic signal exists yet (§9).
+
 ## 5. Module Boundaries
 
 The dependency rule is strict: **dependencies point inward toward `core`**. `core` imports
@@ -98,8 +161,9 @@ nothing from MEMORIA. Packages are created when their phase starts, not before.
 ```
 core          records, hashing, time, history semantics, state fold  (exists)
 store         append-only operation log; SQLite first, Postgres-capable  (exists)
-formation     experience → memory operations (rule-based baseline, pluggable LLM extractors)
-retrieval     lexical + embedding retrieval, retrieval traces
+formation     experience → recorded decisions and versions; episodic + statement baselines  (exists)
+retrieval     signals, ranking, traces, extractive responder; lexical + recency  (exists)
+scenarios     deterministic research fixtures (experience streams)  (exists)
 providers     adapters for LLMs, embedders, vector indexes (local-first)
 experiments   manifests, datasets, interventions, deterministic runner, artifact store
 evaluation    metrics, statistical tests, failure taxonomy
@@ -114,6 +178,9 @@ reports       evidence-backed reports generated from stored runs
 Pluggability is achieved with `typing.Protocol` interfaces owned by the consuming module,
 introduced **when the first implementation is written** (not as empty scaffolding):
 
+- `formation.FormationPolicy` — pure decision function (exists: `episodic-v1`, `statement-v1`)
+- `retrieval.Signal` — per-memory scorer with named raw inputs (exists: `bm25`, `recency`).
+  A dense/embedding signal plugs in here without changes to `core`.
 - `MemoryBackend` — the subject under study (store + formation + retrieval policy)
 - `Embedder`, `VectorIndex`, `LanguageModel` — provider adapters
 - `Dataset`, `Intervention`, `Metric` — experiment components
@@ -129,6 +196,10 @@ runner**, only a new implementation and its registration in a manifest.
   Every append is validated by `core` inside one write transaction; `verify()` re-checks
   the whole log. All domain rules live in `core`, so a PostgreSQL log must reproduce only
   storage and append-only enforcement (triggers/permissions there are backend-specific).
+- **Derived records** (schema v2): an append-only `records` table holds formation
+  decisions, retrieval traces and responses, each validated against the records it
+  references on append and again by `verify()`. v1 logs are migrated additively on open.
+  Identical records are idempotent (same content address = same observation).
 - **Derived indexes** (vector index, graph, caches) are rebuildable from the log and are
   never authoritative.
 - **Artifacts** live under a local, git-ignored `var/` directory, content-addressed, and
@@ -149,7 +220,7 @@ Every arrow is a recorded, replayable transformation.
 |---|---|---|
 | 0 ✓ | Foundation: constitution, tooling, core records | CI green; invariants tested |
 | 1 ✓ | Operation log on SQLite; bitemporal state reconstruction ("state as of t") | Replay reproduces state bit-for-bit from the log |
-| 2 | Formation baseline + retrieval (lexical, local embeddings); retrieval traces | A response is traceable to exact version digests |
+| 2 ✓ | Formation baselines + retrieval (lexical, recency); retrieval traces. Neural embeddings deferred (§9). | A response is traceable to exact version digests |
 | 3 | Experiment runner: manifests, seeds, datasets, interventions, artifact store | Re-running a manifest reproduces its artifacts |
 | 4 | Evaluation: metrics, interval estimates, paired tests, failure taxonomy | Baseline vs. intervention comparison with CIs |
 | 5 | Provenance graph & memory autopsy | Full autopsy of any stored response |
@@ -168,3 +239,10 @@ Every arrow is a recorded, replayable transformation.
 | 2026-09-26 | The state fold lives in `core`, not `store`. | It is pure domain logic; any backend reuses it, and it is testable without I/O. |
 | 2026-09-26 | Record time is supplied by the caller, never read from a clock by the log. | Keeps appends and replays deterministic. |
 | 2026-09-26 | `derived_from` is stored as a sorted, de-duplicated set. | Same citations must yield the same digest. |
+| 2026-09-27 | Neural embedding retrieval is deferred beyond Phase 2; the `Signal` contract is where it plugs in. | Local models add torch-scale dependencies and model downloads, and cross-platform float drift would break digest reproducibility. The exit criterion does not need them. Revisit with a pinned model and a quantised-evidence plan. |
+| 2026-09-27 | Formation decisions are first-class records, including no-change outcomes. | "Why is this not in memory?" must be answerable from stored evidence, not re-derived. |
+| 2026-09-27 | The statement baseline uses an explicit statement language, not NL heuristics. | A baseline must be exactly specifiable; NL extraction belongs to pluggable (e.g. LLM) policies. |
+| 2026-09-27 | Retrieval has no single opaque score: per-signal scores with raw inputs, a gate, weights and ranking rule are all recorded. | Later analysis must be able to attribute a ranking to its causes. |
+| 2026-09-27 | Traces include every memory of the state, not only the selected ones. | Makes "why was X not returned" answerable. |
+| 2026-09-27 | Traces freeze the past (I14) instead of pinning a log position. | Keeps traces meaningful in pure time coordinates and reproducible by recomputation. |
+| 2026-09-27 | Scores are quantised to 12 decimal places; pipeline digests are pinned by a golden test. | Detects platform or semantic drift in stored results. |

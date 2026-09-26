@@ -6,14 +6,25 @@ from pydantic import ValidationError
 from memoria.core import (
     Belief,
     Experience,
+    FormationDecision,
+    FormationReason,
     InvalidTransitionError,
     MemoryVersion,
     Operation,
+    Query,
+    Response,
+    RetrievalTrace,
+    RetrieverSpec,
+    SignalEvidence,
+    SignalSpec,
     beliefs,
     check_citations,
+    check_decision,
     content_hash,
+    quantize,
     state_as_of,
 )
+from memoria.retrieval import lexical_recency
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 FAKE = "sha256:" + "0" * 64
@@ -299,3 +310,183 @@ def test_state_validates_chains() -> None:
     _, v2 = _moved_to_berlin()
     with pytest.raises(InvalidTransitionError):
         state_as_of([v2], valid_at=day(25), known_at=day(30))
+
+
+# --- Phase 2 records: formation decisions ------------------------------------------------
+
+
+D = FormationReason
+
+
+def decision(**overrides: object) -> FormationDecision:
+    v1 = create()
+    fields: dict[str, object] = {
+        "experience": EXP.digest,
+        "policy": "p",
+        "reason": D.NEW_KEY,
+        "memory_id": "m1",
+        "version": v1.digest,
+        "recorded_at": day(0),
+    }
+    return FormationDecision.model_validate(fields | overrides)
+
+
+def test_reason_operation_mapping() -> None:
+    assert D.NEW_KEY.operation is Operation.CREATE
+    assert D.VALUE_CHANGED.operation is Operation.UPDATE
+    assert D.EXPLICIT_CORRECTION.operation is Operation.CORRECT
+    assert D.EXPLICIT_FORGET.operation is Operation.FORGET
+    assert {r for r in D if r.operation is None} == {
+        D.DUPLICATE_EXPERIENCE,
+        D.REDUNDANT,
+        D.STALE,
+        D.CONFLICTING,
+        D.UNKNOWN_KEY,
+        D.UNPARSED,
+    }
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"version": None}, "version must be present"),
+        ({"reason": D.REDUNDANT}, "version must be present"),
+        ({"reason": D.VALUE_CHANGED}, "requires a basis"),
+        ({"basis": FAKE}, "cannot have a basis"),
+        ({"memory_id": None}, "memory_id is required"),
+        ({"reason": D.UNPARSED, "version": None}, "memory_id is required"),
+        ({"policy": ""}, "at least 1 character"),
+    ],
+)
+def test_decision_invariants(overrides: dict[str, object], message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        decision(**overrides)
+
+
+def test_skip_decisions_are_valid_records() -> None:
+    unparsed = decision(reason=D.UNPARSED, memory_id=None, version=None)
+    stale = decision(reason=D.STALE, version=None, basis=create().digest)
+    unknown = decision(reason=D.UNKNOWN_KEY, memory_id=None, version=None)
+    assert unparsed.operation is stale.operation is unknown.operation is None
+
+
+def test_check_decision_cross_references() -> None:
+    v1 = create()
+    check_decision(decision(), EXP, v1, None)
+    other = Experience(source="x", content="y", occurred_at=T0)
+    bad = [
+        ((decision(), other, v1, None), "experience does not match"),
+        ((decision(recorded_at=T0 - timedelta(1)), EXP, v1, None), "before the experience"),
+        ((decision(), EXP, None, None), "version does not match"),
+        ((decision(), EXP, v1, v1), "basis does not match"),
+        ((decision(version=create("m2").digest, memory_id="m2"), EXP, v1, None), "does not match"),
+        ((decision(memory_id="zz"), EXP, v1, None), "not the recorded operation"),
+        ((decision(recorded_at=day(1)), EXP, v1, None), "record times differ"),
+    ]
+    for args, message in bad:
+        with pytest.raises(InvalidTransitionError, match=message):
+            check_decision(*args)
+    uncited = MemoryVersion.model_validate(v1.model_dump() | {"derived_from": (FAKE,)})
+    with pytest.raises(InvalidTransitionError, match="does not cite"):
+        check_decision(decision(version=uncited.digest), EXP, uncited, None)
+    v2 = v1.successor(
+        Operation.UPDATE,
+        recorded_at=day(1),
+        content="x",
+        valid_from=day(1),
+        derived_from=(EXP.digest,),
+    )
+    upd = decision(reason=D.VALUE_CHANGED, version=v2.digest, basis=FAKE, recorded_at=day(1))
+    with pytest.raises(InvalidTransitionError, match="basis does not match"):
+        check_decision(upd, EXP, v2, v1)
+
+
+# --- Phase 2 records: retrieval ------------------------------------------------------------
+
+
+def test_quantize_is_stable() -> None:
+    assert quantize(0.1 + 0.2) == quantize(0.3)
+    assert quantize(1 / 3) == 0.333333333333
+
+
+def test_signal_evidence_inputs_are_canonical_and_validated() -> None:
+    a = SignalEvidence(signal="s", score=1.0, inputs=(("b", 1), ("a", "x")))
+    b = SignalEvidence(signal="s", score=1.0, inputs=(("a", "x"), ("b", 1)))
+    assert a.inputs == (("a", "x"), ("b", 1))
+    assert a.digest == b.digest
+    with pytest.raises(ValidationError, match="unique"):
+        SignalEvidence(signal="s", score=1.0, inputs=(("a", 1), ("a", 2)))
+    for bad in (-1.0, float("nan"), float("inf")):
+        with pytest.raises(ValidationError):
+            SignalEvidence(signal="s", score=bad)
+
+
+@pytest.mark.parametrize(
+    ("signals", "gate", "message"),
+    [
+        ((), "a", "at least 1"),
+        (("a", "a"), "a", "unique"),
+        (("a",), "b", "not one of the signals"),
+    ],
+)
+def test_retriever_spec_invariants(signals: tuple[str, ...], gate: str, message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        RetrieverSpec(
+            name="r", gate=gate, signals=tuple(SignalSpec(name=s, weight=1.0) for s in signals)
+        )
+
+
+def test_signal_weight_must_be_positive_and_finite() -> None:
+    for w in (0.0, -1.0, float("inf")):
+        with pytest.raises(ValidationError):
+            SignalSpec(name="s", weight=w)
+
+
+def test_query_limit_positive() -> None:
+    with pytest.raises(ValidationError):
+        Query(text="x", valid_at=T0, known_at=T0, limit=0)
+
+
+def _trace() -> RetrievalTrace:
+    home = create("home", content="home = Paris")
+    pet = create("pet", content="pet = dog")
+    tea = create("tea", content="drink = tea and home cooking")
+    state = state_as_of([home, pet, tea], valid_at=day(5), known_at=day(5))
+    query = Query(text="home", valid_at=day(5), known_at=day(5), limit=1)
+    return lexical_recency().retrieve(state, query)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda d: d["candidates"][0].update(total=d["candidates"][0]["total"] + 1),
+        lambda d: d["candidates"][0].update(eligible=not d["candidates"][0]["eligible"]),
+        lambda d: d.update(candidates=list(reversed(d["candidates"]))),
+        lambda d: d.update(selected=[]),
+        lambda d: d.update(selected=[c["version"] for c in d["candidates"][:2]]),
+        lambda d: d["candidates"][0].update(signals=d["candidates"][0]["signals"][:1]),
+        lambda d: d.update(candidates=[d["candidates"][0], d["candidates"][0]]),
+    ],
+    ids=["total", "eligible", "order", "unselected", "over-limit", "signals", "duplicate"],
+)
+def test_trace_cannot_be_internally_inconsistent(tamper: object) -> None:
+    dumped = _trace().model_dump(mode="json")
+    tamper(dumped)  # type: ignore[operator]
+    with pytest.raises(ValidationError):
+        RetrievalTrace.model_validate(dumped)
+
+
+def test_trace_roundtrip() -> None:
+    trace = _trace()
+    assert RetrievalTrace.model_validate_json(trace.canonical()).digest == trace.digest
+
+
+def test_response_invariants() -> None:
+    Response(trace=FAKE, responder="r", output=None)
+    Response(trace=FAKE, responder="r", output="x", cited=(FAKE,))
+    with pytest.raises(ValidationError, match="iff it answers"):
+        Response(trace=FAKE, responder="r", output="x")
+    with pytest.raises(ValidationError, match="iff it answers"):
+        Response(trace=FAKE, responder="r", output=None, cited=(FAKE,))
+    with pytest.raises(ValidationError, match="unique"):
+        Response(trace=FAKE, responder="r", output="x", cited=(FAKE, FAKE))

@@ -6,8 +6,19 @@ from pathlib import Path
 
 import pytest
 
-from memoria.core import Experience, InvalidTransitionError, MemoryVersion, Operation
-from memoria.store import LogIntegrityError, MemoryLog
+from memoria.core import (
+    Experience,
+    FormationDecision,
+    FormationReason,
+    InvalidTransitionError,
+    MemoryVersion,
+    Operation,
+    Query,
+    Response,
+    RetrievalTrace,
+)
+from memoria.retrieval import answer, lexical
+from memoria.store import _SCHEMA_V1, SCHEMA_VERSION, LogIntegrityError, MemoryLog
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -236,3 +247,179 @@ def test_refuses_foreign_or_future_databases(tmp_path: Path) -> None:
         db.execute("PRAGMA user_version = 99")
     with pytest.raises(LogIntegrityError):
         MemoryLog(tmp_path / "future.db")
+
+
+# --- Phase 2: schema, transactions, derived records ------------------------------------------
+
+
+def test_v1_log_is_migrated_additively(tmp_path: Path) -> None:
+    path = tmp_path / "v1.db"
+    with raw(path) as db:
+        db.executescript(f"BEGIN;{_SCHEMA_V1}PRAGMA user_version = 1;COMMIT;")
+        db.execute(
+            "INSERT INTO experiences (digest, body) VALUES (?, ?)",
+            (PARIS.digest, PARIS.canonical()),
+        )
+    with MemoryLog(path) as log:
+        assert log.experiences() == [PARIS]
+        populate_rest = create("home", "Paris", PARIS, 0)
+        log.append_version(populate_rest)
+        log.verify()
+    with raw(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 2
+
+
+def test_nested_transaction_failure_undoes_only_its_level(log: MemoryLog) -> None:
+    def failing_inner() -> None:
+        with log.transaction():
+            log.append_experience(TEA)
+            log.append_version(create("x", "y", MOVED, 0))  # cites an unknown experience
+
+    with log.transaction():
+        log.append_experience(PARIS)
+        with pytest.raises(InvalidTransitionError):
+            failing_inner()
+        log.append_experience(MOVED)
+    assert log.experiences() == [PARIS, MOVED]
+
+
+def test_outer_transaction_failure_undoes_everything(log: MemoryLog) -> None:
+    def failing_outer() -> None:
+        with log.transaction():
+            log.append_experience(PARIS)
+            with log.transaction():
+                log.append_experience(TEA)
+            raise RuntimeError
+
+    with pytest.raises(RuntimeError):
+        failing_outer()
+    assert log.experiences() == []
+
+
+def _ask(log: MemoryLog, at: int, text: str = "Paris") -> tuple[RetrievalTrace, Response]:
+    return answer(log, lexical(), Query(text=text, valid_at=day(at), known_at=day(at), limit=2))
+
+
+def test_retrieval_freezes_the_past(log: MemoryLog) -> None:
+    populate(log)
+    _ask(log, 50)
+    later = create("pet", "dog", PARIS, 50)  # recorded exactly at the observed known_at
+    with pytest.raises(InvalidTransitionError, match="frozen"):
+        log.append_version(later)
+    skip = FormationDecision(
+        experience=PARIS.digest, policy="p", reason=FormationReason.UNPARSED, recorded_at=day(50)
+    )
+    with pytest.raises(InvalidTransitionError, match="frozen"):
+        log.append_record(skip)
+    log.append_version(MemoryVersion.model_validate(later.model_dump() | {"recorded_at": day(51)}))
+    log.verify()
+
+
+def test_records_are_append_only(log: MemoryLog) -> None:
+    populate(log)
+    _ask(log, 50)
+    for sql in ("UPDATE records SET body = '{}'", "DELETE FROM records"):
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            log._db.execute(sql)
+
+
+def test_trace_must_describe_this_logs_state(log: MemoryLog, tmp_path: Path) -> None:
+    populate(log)
+    with MemoryLog(tmp_path / "other.db") as other:
+        other.append_experience(PARIS)
+        other.append_version(create("home", "Lyon", PARIS, 0))
+        foreign, _ = _ask(other, 50, "Lyon")
+    with pytest.raises(InvalidTransitionError, match="state digest"):
+        log.append_record(foreign)
+
+
+def test_response_references_are_checked(log: MemoryLog) -> None:
+    populate(log)
+    trace, response = _ask(log, 10)
+    orphan = Response(trace="sha256:" + "1" * 64, responder="r", output="x", cited=response.cited)
+    with pytest.raises(InvalidTransitionError, match="unknown trace"):
+        log.append_record(orphan)
+    unselected = next(c.version for c in trace.candidates if c.version not in trace.selected)
+    liar = Response(trace=trace.digest, responder="r", output="x", cited=(unselected,))
+    with pytest.raises(InvalidTransitionError, match="did not select"):
+        log.append_record(liar)
+
+
+def test_decision_references_are_checked(log: MemoryLog) -> None:
+    populate(log)
+    home = log.history("home")[0]
+    ghost = "sha256:" + "2" * 64
+    base = {
+        "experience": PARIS.digest,
+        "policy": "p",
+        "reason": FormationReason.NEW_KEY,
+        "memory_id": "home",
+        "version": home.digest,
+        "recorded_at": day(40),
+    }
+    cases: list[tuple[dict[str, object], str]] = [
+        ({"experience": ghost}, "unknown experience"),
+        ({"version": ghost}, "unknown version"),
+        ({"reason": FormationReason.STALE, "version": None, "basis": ghost}, "unknown basis"),
+        ({}, "record times differ"),
+    ]
+    for overrides, message in cases:
+        with pytest.raises(InvalidTransitionError, match=message):
+            log.append_record(FormationDecision.model_validate(base | overrides))
+
+
+def _tamper_records(path: Path, sql: str) -> None:
+    with raw(path) as db:
+        db.execute("DROP TRIGGER records_no_update")
+        db.execute("DROP TRIGGER records_no_delete")
+        db.execute(sql)
+
+
+def test_tampered_response_detected(tmp_path: Path) -> None:
+    with MemoryLog(tmp_path / "t.db") as log:
+        populate(log)
+        _ask(log, 10)
+    _tamper_records(
+        tmp_path / "t.db",
+        "UPDATE records SET body = replace(body, 'Paris', 'Rome') WHERE kind = 'response'",
+    )
+    with MemoryLog(tmp_path / "t.db") as log, pytest.raises(LogIntegrityError, match="digest"):
+        log.records(Response)
+
+
+def test_deleted_trace_detected_by_verify(tmp_path: Path) -> None:
+    with MemoryLog(tmp_path / "t.db") as log:
+        populate(log)
+        _ask(log, 10)
+    _tamper_records(tmp_path / "t.db", "DELETE FROM records WHERE kind = 'retrieval_trace'")
+    with (
+        MemoryLog(tmp_path / "t.db") as log,
+        pytest.raises(LogIntegrityError, match="unknown trace"),
+    ):
+        log.verify()
+
+
+def test_backdated_version_detected_by_verify(tmp_path: Path) -> None:
+    """A version smuggled in before an observed known_at changes that observation."""
+    with MemoryLog(tmp_path / "t.db") as log:
+        populate(log)
+        _ask(log, 50)
+    smuggled = create("pet", "dog", PARIS, 45)
+    with raw(tmp_path / "t.db") as db:
+        db.execute(
+            "INSERT INTO memory_versions (digest, memory_id, version, body) VALUES (?,?,?,?)",
+            (smuggled.digest, "pet", 1, smuggled.canonical()),
+        )
+    with MemoryLog(tmp_path / "t.db") as log, pytest.raises(LogIntegrityError):
+        log.verify()
+
+
+def test_lookups_by_digest(log: MemoryLog) -> None:
+    populate(log)
+    trace, response = _ask(log, 10)
+    home = log.history("home")[0]
+    assert log.version(home.digest) == home
+    assert log.experience(PARIS.digest) == PARIS
+    assert log.record(Response, response.digest) == response
+    assert log.record(Response, trace.digest) is None  # right digest, wrong kind
+    assert log.version("sha256:" + "3" * 64) is None
