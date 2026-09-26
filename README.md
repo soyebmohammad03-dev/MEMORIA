@@ -16,58 +16,48 @@ back to its sources.
 
 ## Status
 
-**Phase 3 complete: reproducible experiments.** What exists today:
+**Phase 4 complete: evaluation and failure analysis.** What exists today:
 
 - The project constitution and architecture ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md))
-- `memoria.core`: content-addressed, immutable records with enforced invariants:
-  experiences, bitemporal hash-linked memory versions (create / update / correct /
-  forget), formation decisions, retrieval traces, responses, datasets, probes with
-  epistemic ground truth (`known` / `unknown` / `contested`), manifests and run records
-- `memoria.store`: an append-only SQLite log that validates every append and reference,
-  verifies digests on read, and exports to / loads from canonical JSON Lines
-- `memoria.formation`: `episodic-v1` and `statement-v1` baseline policies, every decision
-  recorded with a reason
-- `memoria.retrieval`: BM25 and recency signals with per-candidate evidence, an
-  extractive responder that abstains without evidence
-- `memoria.interventions`: seeded `drop`, `delay`, `reorder`, `contaminate` and `inject`
-  perturbations of an experience stream
-- `memoria.artifacts`: a content-addressed, write-once local artifact store
-- `memoria.experiments`: a registry and runner that turn a manifest into artifacts, and a
-  `reproduce` check that re-runs a manifest and compares every artifact digest
-- `memoria.scenarios`: a hand-built year-long dataset and a seeded generator
-  (`drifting_facts`) with ground truth computed from the simulated world
+- **Memory history** (`core`, `store`): content-addressed, immutable, bitemporal records;
+  create / update / correct / forget; an append-only, verified SQLite log
+- **Formation and retrieval** (`formation`, `retrieval`): `episodic-v1` and
+  `statement-v1` policies with recorded decisions; BM25 and recency retrieval with full
+  per-candidate evidence; an extractive responder that abstains without evidence
+- **Experiments** (`interventions`, `artifacts`, `experiments`, `scenarios`): seeded
+  `drop` / `delay` / `reorder` / `contaminate` / `inject` interventions, a write-once
+  artifact store, a manifest runner with a `reproduce` check, and datasets with
+  epistemic ground truth (`known` / `unknown` / `contested`)
+- **Evaluation** (`comparison`, `taxonomy`, `statistics`, `evaluation`): exact answer
+  readings (statement, assignment, natural-language mention); a provenance-based failure
+  taxonomy (stale, contaminated, correction failure, temporal error, contradiction,
+  wrong memory, forgotten recalled, missing memory, retrieval miss, unsupported, ...) with
+  the rule that fired and a retrieval-versus-memory locus; measurements that list their
+  probes; Wilson intervals; paired baseline-vs-treatment comparisons with Newcombe
+  intervals, exact McNemar tests, Holm adjustment and underpowered flags
 
-Runs record answers next to expectations; scoring and statistics are Phase 4. No neural
-embeddings, LLM providers, API or UI exist yet. The roadmap is in §8 of the architecture
-document. This README describes only what is implemented.
+No neural embeddings, LLM providers, provenance graph, API or UI exist yet. The roadmap
+is in §8 of the architecture document. This README describes only what is implemented.
 
 ```python
 from memoria.artifacts import ArtifactStore
-from memoria.core import InterventionSpec, RunManifest, RunOutcomes
-from memoria.experiments import execute, reproduce
-from memoria.retrieval import EXTRACTIVE, lexical_recency
-from memoria.scenarios import drifting_facts
+from memoria.evaluation import compare, evaluate
+from memoria.experiments import execute
+from memoria.scenarios import conditions, drifting_facts
 
 store = ArtifactStore("var/artifacts")
-dataset = store.put_record(drifting_facts(seed=7))
-manifest = RunManifest(
-    name="contamination-1d",
-    dataset=dataset,
-    interventions=(
-        InterventionSpec(
-            name="contaminate",
-            params=(("delay_days", 1), ("rate", 0.5), ("seed", 1), ("source", "contaminant")),
-        ),
-    ),
-    policy="statement-v1",
-    retriever=lexical_recency().spec,
-    responder=EXTRACTIVE,
-)
-run = execute(manifest, store)  # every artifact is stored and named by digest
-outcomes = store.get_record(RunOutcomes, run.outcomes)
-for probe in outcomes.probes[:3]:
-    print(probe.probe, probe.output, probe.expected.status, probe.expected.values)
-print(reproduce(run.digest, store).reproduced)  # True: same manifest, same artifacts
+dataset = store.put_record(drifting_facts(seed=7, keys=8, changes=8, probes_per_key=12))
+runs = conditions(dataset, "statement-v1")  # baseline, drop, delay, reorder, ...
+
+baseline = evaluate(execute(runs["baseline"], store).digest, store)
+treated = evaluate(execute(runs["contaminate"], store).digest, store)
+comparison = compare(baseline.digest, treated.digest, store)  # one variable changed
+
+m = comparison.measure("known.correct")
+print(f"{m.baseline.estimate:.2f} -> {m.treatment.estimate:.2f} (n={len(m.pairs)})")
+print(f"difference {m.difference:+.3f}, 95% CI [{m.low:.3f}, {m.high:.3f}], p={m.p_value:.2g}")
+for t in comparison.transitions:  # which probes failed, and how
+    print(t.baseline.value, "->", t.treatment.value, len(t.probes))
 ```
 
 ## Research areas (planned)

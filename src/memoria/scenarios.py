@@ -21,10 +21,14 @@ from memoria.core import (
     Expectation,
     ExpectationStatus,
     Experience,
+    InterventionSpec,
     Probe,
+    RunManifest,
+    Scalar,
     Step,
     unit_interval,
 )
+from memoria.retrieval import EXTRACTIVE, lexical_recency
 
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -185,3 +189,55 @@ def epistemic_truth(
     latest = max(o for o, _ in visible)
     values = {v for o, v in visible if o == latest}
     return known(values.pop()) if len(values) == 1 else contested(*values)
+
+
+def neighbours() -> Dataset:
+    """Interference: keys that share vocabulary (``home`` / ``home.office``) and a value
+    that changes. Probes ask about one key using words that also match the other."""
+    steps = (
+        _step(0, "set home = Paris", "chat:0"),
+        _step(1, "set home.office = Lyon", "chat:1"),
+        _step(10, "set home.office = Nice", "chat:10"),
+        _step(12, "Working from the home office today.", "chat:12"),
+    )
+    probes = (
+        _probe("home", "home", 20, 20, known("Paris")),
+        _probe("office-before-move", "home office", 5, 20, known("Lyon")),
+        _probe("office-after-move", "home office", 15, 20, known("Nice")),
+        _probe("office-alone", "office", 15, 20, known("Nice")),
+    )
+    return Dataset(name="neighbours", version="1", steps=steps, probes=probes)
+
+
+def conditions(dataset: str, policy: str, *, seed: int = 1) -> dict[str, RunManifest]:
+    """The standard intervention grid over one dataset and policy, one manifest per
+    condition. Each differs from ``baseline`` in exactly one variable (its intervention),
+    so every condition can be compared with the baseline under Principle 4."""
+
+    def run(name: str, *interventions: InterventionSpec) -> RunManifest:
+        return RunManifest(
+            name=name,
+            dataset=dataset,
+            interventions=interventions,
+            policy=policy,
+            retriever=lexical_recency().spec,
+            responder=EXTRACTIVE,
+        )
+
+    def spec(name: str, **params: Scalar) -> InterventionSpec:
+        return InterventionSpec(name=name, params=tuple(params.items()))
+
+    return {
+        "baseline": run("baseline"),
+        "drop": run("drop", spec("drop", rate=0.3, seed=seed)),
+        "delay": run("delay", spec("delay", rate=0.5, seed=seed, days=20)),
+        "reorder": run("reorder", spec("reorder", seed=seed, window_days=15)),
+        "contradict": run(
+            "contradict",
+            spec("contaminate", rate=0.5, seed=seed, delay_days=0, source="contaminant"),
+        ),
+        "contaminate": run(
+            "contaminate",
+            spec("contaminate", rate=0.5, seed=seed, delay_days=1, source="contaminant"),
+        ),
+    }

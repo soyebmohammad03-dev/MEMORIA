@@ -59,6 +59,12 @@ These are enforced in code and tests, not by convention.
 | I21 | Every seeded choice is `unit_interval(seed, *labels)`: stateless, platform-independent, and a function of content rather than position or call order. |
 | I22 | A run's record and every artifact it names are a deterministic function of its manifest and input artifacts. Environment details are recorded separately and never enter those digests. |
 | I23 | Manifest names are resolved through a registry and checked by round-trip: a resolved component must describe itself exactly as the manifest does. |
+| I24 | Evaluation only reads run artifacts and writes new ones (`Evaluation`, `RunComparison`). Ground truth and run outputs are never altered. |
+| I25 | Every measurement lists the probe ids in its numerator and denominator, and its estimate and interval are validated to follow from those counts. |
+| I26 | Undefined is not zero: n = 0 gives no estimate and no interval. Unscorable outputs are excluded from accuracy denominators and reported as their own measurement. |
+| I27 | Effects are measured only by paired comparison on identical probes of two runs that differ in exactly one manifest variable (Principle 4). |
+| I28 | A classification records the rule that fired and the claims it relied on. Answer text decides *whether* an answer matches; provenance decides *why* it failed. |
+| I29 | Every paired test reports its counts, a Newcombe interval, an exact p-value, its Holm adjustment within a family, and whether it is underpowered. |
 
 Tooling standard: Python ≥3.12, Pydantic v2, `mypy --strict`, Ruff, pytest with warnings
 as errors, `uv` with a committed lockfile, CI on every push.
@@ -83,7 +89,11 @@ as errors, `uv` with a committed lockfile, CI on every push.
 | **Run manifest** | Everything that determines a run (see Principle 2). Its hash is the run ID. | `core.py` |
 | **Run record / outcomes** | Digests of every artifact a run produced; per-step decisions or rejections and per-probe answers next to expectations. | `core.py`, `experiments.py` |
 | **Execution** | The environment a run was executed in. Evidence about a run, not part of its identity. | `experiments.py` |
-| **Measurement** | A metric value with n, interval, and the run/artifact digests it came from. | Phase 4 |
+| **Reading / Agreement** | What an output asserts (reader, original text, normalised tokens) and whether that agrees with the expectation. | `comparison.py` |
+| **Claim / Relation** | A statement experience read as a claim about one key; how two claims relate (independent, same, retraction, contradiction, correction, temporal change). | `taxonomy.py` |
+| **Classification** | A probe outcome class, the rule that fired, the failure locus, and the claims used. | `taxonomy.py` |
+| **Measurement** | A metric value with n, interval, the probes counted, and (via its `Evaluation`) the run it came from. | `evaluation.py`, `statistics.py` |
+| **Evaluation / RunComparison** | All probe judgements and measurements for one run; a paired baseline-vs-treatment comparison of two evaluations. | `evaluation.py` |
 | **Autopsy** | The provenance DAG from a response back through retrieval → versions → operations → experiences, at a point in both time axes. | Phase 5 |
 
 The `update`/`correct` distinction is deliberate: it separates *temporal change* from
@@ -205,6 +215,82 @@ computed from the simulated world, `epistemic_truth`).
 Not in Phase 3: contradiction/consistency *classification* (belongs with the Phase 4
 failure taxonomy), scoring and statistics, a CLI.
 
+### 4.5 Evaluation semantics
+
+`evaluation.evaluate(run, store, spec)` reads a stored run and writes an `Evaluation`;
+`evaluation.compare(baseline, treatment, store)` writes a `RunComparison`. The
+`EvaluationSpec` (readers and their order, comparator `tokens-v1`, classifier
+`provenance-v1`, confidence, alpha) is part of every result's identity.
+
+Pipeline, per probe: observation (stored outcome, trace, response, log) → **reading**
+→ **agreement** → **classification** → measurement → statistics.
+
+**Comparison** (`comparison.py`). Values are equal iff their token sequences are equal
+after Unicode NFKC, case folding and word tokenisation — no stemming, synonyms or fuzzy
+thresholds. Readers, first applicable wins: `statement` (`set|correct k = v`),
+`assignment` (`k = v`, memory content), `mention` (whole-token occurrences of dataset
+values in free text; longer matches absorb contained ones; two distinct values =
+ambiguous). The original output, reader and tokens are kept.
+
+**Fact model** (`taxonomy.py`). Statement experiences are claims. Two claims on one key
+are related by *occurrence* time: same instant and different values = contradiction;
+different times = temporal change, or correction when the later one is a `correct`.
+Ingestion order never decides. The *observed* claim is found through provenance
+(cited version → source experience → claim); the *support* is the latest-occurring
+authored claim(s) visible at `known_at` that assert an expected value.
+
+**Outcomes** (one per probe; rules checked in this order, each recorded by id):
+
+| Situation | Outcome | Category |
+|---|---|---|
+| abstained; expected `unknown` | `correct_abstention` | success |
+| abstained; `contested` | `contested_abstained` | neutral |
+| abstained; expected memory held / not held | `retrieval_miss` / `missing_memory` | failure |
+| matched; `known` / `contested` | `correct` / `contested_answered` | success / neutral |
+| several values mentioned | `ambiguous_output` | unscorable |
+| unreadable; cites only memories about other subjects | `wrong_memory` | failure |
+| unreadable; cites a subject memory asserting no value (`forget`) | treated as a non-answer (the abstention outcomes above) | — |
+| unreadable otherwise | `malformed_output` | unscorable |
+| mismatch; expectation has no supporting claim | `unclassifiable` | unscorable |
+| answer not in the cited evidence / asserted by no visible claim | `unsupported` | failure |
+| observed claim is about another key | `wrong_memory` (interference) | failure |
+| observed claim was introduced by an intervention | `contaminated` | failure |
+| `unknown` expected; claim later forgotten | `forgotten_recalled` | failure |
+| claim not yet true at `valid_at` (corrections exempt: retroactive) | `temporal_error` | failure |
+| claim is the value a correction replaced | `correction_failure` | failure |
+| claim contradicts the support at the same instant | `contradiction` | failure |
+| claim is older than the support | `stale` | failure |
+| claim is newer than the support | `unsupported` | failure |
+
+**Locus** of a failure: `retrieval` if a memory asserting the expected value was in the
+queried state (or the answer came from another subject's memory), else `memory`. For
+known-value failures without the expected memory, the **cause** is determined from the
+run: `not_ingested` (never in the stream), `not_yet_ingested` (after `known_at`),
+`rejected_by_log`, `rejected_by_policy` (with the policy's reason), `superseded`, or
+`outside_validity` (believed, but its interval excludes `valid_at`).
+
+**Measurements** (fixed set; each lists its probes): `coverage`, `unscorable` (all
+probes); `known.correct`, `known.abstained`, `known.expected_in_state` (scorable
+known-value probes); `known.expected_selected_given_in_state`; `unknown.abstained`;
+`contested.answered`; `outcome.<class>` for every class (all probes; a partition);
+`failure.locus.<locus>` (failures); `failure.cause.<cause>` (known-value failures without
+the expected memory — causes may sum to less than the population if undetermined).
+
+**Statistics** (`statistics.py`). Proportions: Wilson score interval. Paired comparison
+of an indicator on the same probes: difference treatment − baseline with Newcombe (1998)
+method 10 interval (continuity-corrected phi; reproduces the paper's Table III), exact
+two-sided McNemar p-value, Holm adjustment within a family (`primary`, `outcome`,
+`locus`), and `underpowered` when even the most one-sided split of the discordant pairs
+could not reach `alpha` (e.g. ≤ 5 discordant pairs at 0.05). Transitions list which
+probes moved between which outcomes.
+
+**Assumptions and limits.** Intervals treat probes as independent; probes about the same
+key share memory state, so intervals may be optimistic for clustered probes (cluster-aware
+methods are deferred). Multiplicity is adjusted within a comparison, not across
+comparisons. The fact model is the statement language: datasets without it are compared
+on text, but claim-based classes cannot apply. The mention reader recognises only values
+asserted somewhere in the dataset.
+
 ## 5. Module Boundaries
 
 The dependency rule is strict: **dependencies point inward toward `core`**. `core` imports
@@ -220,7 +306,10 @@ interventions seeded dataset perturbations  (exists)
 artifacts     content-addressed write-once local store  (exists)
 providers     adapters for LLMs, embedders, vector indexes (local-first)
 experiments   registry, deterministic runner, reproduction check  (exists)
-evaluation    metrics, statistical tests, failure taxonomy
+comparison    answer readings and agreement  (exists)
+taxonomy      claims, relations, outcome classification  (exists)
+statistics    Wilson, Newcombe paired, exact McNemar, Holm  (exists)
+evaluation    evaluations, measurements, paired comparisons  (exists)
 provenance    autopsy / provenance graph (NetworkX)
 api           FastAPI surface over the above (no logic of its own)
 observatory   interactive visualisation (consumes api only)
@@ -241,7 +330,10 @@ introduced **when the first implementation is written** (not as empty scaffoldin
   `reorder`, `contaminate`, `inject`)
 - `experiments.Registry` — resolves manifest names; `extend()` adds components, never
   redefines them
-- `Dataset` (a record, not a protocol: any generator producing one plugs in), `Metric` (Phase 4)
+- `Dataset` (a record, not a protocol: any generator producing one plugs in)
+- Evaluation components are versioned names in `EvaluationSpec` (`tokens-v1`,
+  `provenance-v1`, readers). One implementation each exists, so there is no registry;
+  an unimplemented name is refused rather than silently substituted.
 
 Adding a backend, model, dataset, or metric must require **no change to `core` or the
 runner**, only a new implementation and its registration in a manifest.
@@ -285,7 +377,7 @@ Every arrow is a recorded, replayable transformation.
 | 1 ✓ | Operation log on SQLite; bitemporal state reconstruction ("state as of t") | Replay reproduces state bit-for-bit from the log |
 | 2 ✓ | Formation baselines + retrieval (lexical, recency); retrieval traces. Neural embeddings deferred (§9). | A response is traceable to exact version digests |
 | 3 ✓ | Experiment runner: manifests, seeds, datasets, interventions, artifact store | Re-running a manifest reproduces its artifacts |
-| 4 | Evaluation: metrics, interval estimates, paired tests, failure taxonomy | Baseline vs. intervention comparison with CIs |
+| 4 ✓ | Evaluation: metrics, interval estimates, paired tests, failure taxonomy | Baseline vs. intervention comparison with CIs |
 | 5 | Provenance graph & memory autopsy | Full autopsy of any stored response |
 | 6 | API + observatory UI | UI renders only stored evidence |
 | 7 | Report generation | Reports cite run/artifact digests for every claim |
@@ -317,3 +409,11 @@ Every arrow is a recorded, replayable transformation.
 | 2026-09-27 | Components are resolved by name with a round-trip check (I23). Rejected: pickled callables or code hashes in manifests. | Names with explicit versions are human-readable and stable; the round-trip check prevents a name silently meaning different parameters. |
 | 2026-09-27 | Rejected steps are recorded and the run continues. | A refusal by the log is a measured outcome, not a crash. |
 | 2026-09-27 | Runs record answers beside expectations but do not score them. | Matching answers to expectations (e.g. across content formats) is an evaluation decision for Phase 4. |
+| 2026-09-27 | Answers are compared by exact token sequences with explicit readers. Rejected: edit-distance or embedding similarity thresholds; an LLM judge. | A threshold hides a decision in a number and drifts with models; exact rules are auditable and reproducible. |
+| 2026-09-27 | Failure classes come from provenance (cited version → experience → claim), not from answer text alone. | Text says an answer is wrong; only provenance says whether it was stale, contaminated, corrected, or from another subject. |
+| 2026-09-27 | Claims relate by occurrence time; ingestion order never decides truth. Rejected: "latest ingested wins". | Newer is not more true; a temporal change is not a contradiction. |
+| 2026-09-27 | Contested ground truth is neutral, and a valueless (retraction) answer is judged as a non-answer. | A conflict is not automatically an error; abstaining on insufficient evidence is not a failure. |
+| 2026-09-27 | Wilson intervals for proportions. Rejected: Wald (leaves [0,1], poor at small n); Clopper-Pearson (overly conservative). | Good coverage at the small n typical here, closed form, deterministic. |
+| 2026-09-27 | Newcombe method 10 for paired differences. Rejected: paired Wald; method 8 (coverage dips at small n); bootstrap (resampling, unstable at small n). | Recommended by Newcombe; closed form; verified against the paper's Table III. |
+| 2026-09-27 | Exact McNemar with Holm within families, plus an underpowered flag. Rejected: chi-square McNemar (invalid for small discordant counts); Bonferroni (uniformly less powerful than Holm); unadjusted p-values. | Honest inference at small n: a result that cannot reach significance says so. |
+| 2026-09-27 | Evaluation records live in `evaluation.py`, not `core.py`. | They are derived interpretation (Principle 6), kept apart from the recorded history they judge. |
