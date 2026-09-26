@@ -7,6 +7,7 @@ SQLite-specific parts: the guard triggers, savepoints and ``PRAGMA user_version`
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -75,6 +76,11 @@ _KINDS: dict[type[Record], str] = {
     FormationDecision: "formation_decision",
     RetrievalTrace: "retrieval_trace",
     Response: "response",
+}
+_EXPORT_KINDS: dict[type[Record], str] = {
+    Experience: "experience",
+    MemoryVersion: "memory_version",
+    **_KINDS,
 }
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -314,6 +320,77 @@ class MemoryLog:
         )
         found = _load(model, rows)
         return found[0] if found else None
+
+    def export(self) -> bytes:
+        """Canonical JSON Lines serialisation of the whole log: ``{"kind", "record"}`` per line.
+
+        Order: experiences (append order); then versions and decisions merged by record
+        time (a version before a decision at the same instant, append order otherwise);
+        then traces and responses in append order. Every such order is a valid replay,
+        and equal logs export to identical bytes.
+        """
+        timed: list[tuple[datetime, int, int, Record]] = [
+            (v.recorded_at, 0, i, v) for i, v in enumerate(self.versions())
+        ]
+        timed += [(d.recorded_at, 1, i, d) for i, d in enumerate(self.records(FormationDecision))]
+        rows = self._db.execute(
+            "SELECT kind, digest, body FROM records WHERE kind IN (?, ?) ORDER BY seq",
+            (_KINDS[RetrievalTrace], _KINDS[Response]),
+        )
+        observations = [
+            _load(RetrievalTrace if kind == _KINDS[RetrievalTrace] else Response, [(d, b)])[0]
+            for kind, d, b in rows
+        ]
+        ordered: list[Record] = [
+            *self.experiences(),
+            *(r for *_, r in sorted(timed, key=lambda t: t[:3])),
+            *observations,
+        ]
+        return "".join(
+            core.canonical_json(
+                {"kind": _EXPORT_KINDS[type(r)], "record": r.model_dump(mode="json")}
+            )
+            + "\n"
+            for r in ordered
+        ).encode("utf-8")
+
+    @classmethod
+    def load(cls, data: bytes, path: str | Path = ":memory:") -> MemoryLog:
+        """Rebuild a log from :meth:`export` output, re-validating every record on append.
+
+        The target must be empty. Non-canonical, malformed or invalid lines are rejected.
+        """
+        log = cls(path)
+        try:
+            if log._db.execute(
+                "SELECT (SELECT COUNT(*) FROM experiences) + (SELECT COUNT(*) FROM records)"
+            ).fetchone()[0]:
+                raise LogIntegrityError(f"{path}: can only load into an empty log")
+            models = {kind: model for model, kind in _EXPORT_KINDS.items()}
+            with log.transaction():
+                for n, line in enumerate(data.decode("utf-8").splitlines(), 1):
+                    try:
+                        entry = json.loads(line)
+                        model = models[entry["kind"]]
+                        record = model.model_validate(entry["record"])
+                    except (ValueError, KeyError, TypeError) as e:
+                        raise LogIntegrityError(f"line {n}: not a valid log entry") from e
+                    if core.canonical_json(entry) != line:
+                        raise LogIntegrityError(f"line {n}: not in canonical form")
+                    try:
+                        match record:
+                            case Experience():
+                                log.append_experience(record)
+                            case MemoryVersion():
+                                log.append_version(record)
+                            case FormationDecision() | RetrievalTrace() | Response():
+                                log.append_record(record)
+                    except InvalidTransitionError as e:
+                        raise LogIntegrityError(f"line {n}: {e}") from e
+        except BaseException:
+            log.close()
+            raise
+        return log
 
     def state_as_of(self, *, valid_at: datetime, known_at: datetime) -> MemoryState:
         # ponytail: full-log scan per query; add snapshots/indexes when logs outgrow memory.

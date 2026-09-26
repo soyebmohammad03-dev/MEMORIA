@@ -54,6 +54,11 @@ These are enforced in code and tests, not by convention.
 | I16 | A retrieval trace lists every memory of the queried state and re-derives its own eligibility, totals, ranking and selection; the state it names must be the log's state at its coordinates. |
 | I17 | A response cites only versions its trace selected, and cites evidence iff it answers. |
 | I18 | Derived scores are quantised (12 decimal places) before recording, so digests do not depend on last-bit floating-point differences between platforms. |
+| I19 | Interventions transform datasets (the input stream), never a memory log. Stored history is not branched, edited or replayed selectively. |
+| I20 | Probes and their expectations are never changed by interventions: the instrument stays fixed while the input is perturbed. |
+| I21 | Every seeded choice is `unit_interval(seed, *labels)`: stateless, platform-independent, and a function of content rather than position or call order. |
+| I22 | A run's record and every artifact it names are a deterministic function of its manifest and input artifacts. Environment details are recorded separately and never enter those digests. |
+| I23 | Manifest names are resolved through a registry and checked by round-trip: a resolved component must describe itself exactly as the manifest does. |
 
 Tooling standard: Python ≥3.12, Pydantic v2, `mypy --strict`, Ruff, pytest with warnings
 as errors, `uv` with a committed lockfile, CI on every push.
@@ -71,8 +76,13 @@ as errors, `uv` with a committed lockfile, CI on every push.
 | **Query** | Retrieval text pinned to both time axes (`valid_at`, `known_at`) and a result limit. | `core.py` |
 | **Retrieval trace** | Query, full retriever spec, state digest, every candidate with per-signal scores and raw inputs, and the selected version digests. | `core.py` |
 | **Response** | An answer (or abstention), the responder that produced it, and the exact version digests it cites. A prompt is added when an LLM responder exists. | `core.py` |
-| **Intervention** | A controlled perturbation: inject contradiction, contaminate, delete, delay, reorder. | Phase 3 |
-| **Run manifest** | Everything that determines a run (see Principle 2). Its hash is the run ID. | Phase 3 |
+| **Step** | An experience plus the record time at which a system under study ingests it. | `core.py` |
+| **Probe / Expectation** | A question pinned to (valid, known) time, with epistemic ground truth: `known` (one value), `unknown`, or `contested` (several values, undecided). | `core.py` |
+| **Dataset** | A named, versioned, ingestion-ordered stream of steps plus probes. | `core.py`, `scenarios.py` |
+| **Intervention** | A controlled, seeded perturbation of a dataset: delete (`drop`), `delay`, `reorder`, `contaminate`, `inject` (e.g. contradictions). Recorded as an `InterventionRecord` (spec, input, output, step diff). | `interventions.py`, `core.py` |
+| **Run manifest** | Everything that determines a run (see Principle 2). Its hash is the run ID. | `core.py` |
+| **Run record / outcomes** | Digests of every artifact a run produced; per-step decisions or rejections and per-probe answers next to expectations. | `core.py`, `experiments.py` |
+| **Execution** | The environment a run was executed in. Evidence about a run, not part of its identity. | `experiments.py` |
 | **Measurement** | A metric value with n, interval, and the run/artifact digests it came from. | Phase 4 |
 | **Autopsy** | The provenance DAG from a response back through retrieval → versions → operations → experiences, at a point in both time axes. | Phase 5 |
 
@@ -153,6 +163,48 @@ Known limits: tie-breaking by `memory_id` is deterministic but semantically arbi
 (the episodic baseline demonstrably returns a stale report on a three-way tie); no
 dense/semantic signal exists yet (§9).
 
+### 4.4 Experiment semantics
+
+`experiments.execute(manifest, store)`:
+
+1. Resolves the policy, retriever, responder and interventions the manifest names (I23),
+   and loads the dataset by digest, before doing any work. Unresolvable manifests fail
+   without writing anything.
+2. Applies interventions in order; stores every derived dataset and an
+   `InterventionRecord` linking input → output with the exact step diff.
+3. Ingests the effective dataset into a fresh log with `formation.form`. A step the log
+   refuses is recorded as a rejection (with the reason) and the run continues.
+4. Asks every probe with `retrieval.answer`, recording trace and response in the log.
+5. Stores the log's canonical export, a `RunOutcomes` table, the manifest, the
+   `RunRecord`, and a separate `Execution` record.
+
+`reproduce(run, store)` re-executes the stored manifest and compares every artifact
+digest; differing artifacts are kept alongside the originals.
+
+**Interventions** (all parameters, including seeds, are recorded):
+
+| Name | Effect | Never |
+|---|---|---|
+| `drop(rate, seed)` | removes selected steps | — |
+| `delay(rate, seed, days)` | ingests selected steps later; the experience is unchanged | moves ingestion earlier |
+| `reorder(seed, window_days)` | jitters ingestion order within a window, then keeps record time monotone | ingests anything earlier than planned |
+| `contaminate(rate, seed, delay_days, source)` | adds a false copy (`<value> (contaminated)`) of selected `set`/`correct` statements; source `<source>:<original digest>`. `delay_days = 0` is a same-instant contradiction | touches non-statements |
+| `inject(dataset)` | merges another stored dataset's steps (hand-built contradictions or contamination) | — |
+
+**Ground truth** is epistemic and fixed on the authored dataset (I20): what an ideal
+system could believe about `valid_at` from experiences recorded by `known_at` — the
+latest report *by occurrence* holds; equal-time disagreement is `contested`; honouring
+`forget` yields `unknown`. Recency of ingestion never makes a report more true. Under an
+intervention the expectation is unchanged, so runs measure degradation against a fixed
+reference. `RunOutcomes` records answers next to expectations; **judging them is Phase 4**.
+
+Datasets: `scenarios.relocation_year()` (hand-built, 16 steps, 12 probes covering every
+expectation status) and `scenarios.drifting_facts(seed, ...)` (generated, with ground truth
+computed from the simulated world, `epistemic_truth`).
+
+Not in Phase 3: contradiction/consistency *classification* (belongs with the Phase 4
+failure taxonomy), scoring and statistics, a CLI.
+
 ## 5. Module Boundaries
 
 The dependency rule is strict: **dependencies point inward toward `core`**. `core` imports
@@ -163,9 +215,11 @@ core          records, hashing, time, history semantics, state fold  (exists)
 store         append-only operation log; SQLite first, Postgres-capable  (exists)
 formation     experience → recorded decisions and versions; episodic + statement baselines  (exists)
 retrieval     signals, ranking, traces, extractive responder; lexical + recency  (exists)
-scenarios     deterministic research fixtures (experience streams)  (exists)
+scenarios     deterministic research datasets with probes and ground truth  (exists)
+interventions seeded dataset perturbations  (exists)
+artifacts     content-addressed write-once local store  (exists)
 providers     adapters for LLMs, embedders, vector indexes (local-first)
-experiments   manifests, datasets, interventions, deterministic runner, artifact store
+experiments   registry, deterministic runner, reproduction check  (exists)
 evaluation    metrics, statistical tests, failure taxonomy
 provenance    autopsy / provenance graph (NetworkX)
 api           FastAPI surface over the above (no logic of its own)
@@ -183,7 +237,11 @@ introduced **when the first implementation is written** (not as empty scaffoldin
   A dense/embedding signal plugs in here without changes to `core`.
 - `MemoryBackend` — the subject under study (store + formation + retrieval policy)
 - `Embedder`, `VectorIndex`, `LanguageModel` — provider adapters
-- `Dataset`, `Intervention`, `Metric` — experiment components
+- `interventions.Intervention` — dataset → dataset perturbation (exists: `drop`, `delay`,
+  `reorder`, `contaminate`, `inject`)
+- `experiments.Registry` — resolves manifest names; `extend()` adds components, never
+  redefines them
+- `Dataset` (a record, not a protocol: any generator producing one plugs in), `Metric` (Phase 4)
 
 Adding a backend, model, dataset, or metric must require **no change to `core` or the
 runner**, only a new implementation and its registration in a manifest.
@@ -202,8 +260,13 @@ runner**, only a new implementation and its registration in a manifest.
   Identical records are idempotent (same content address = same observation).
 - **Derived indexes** (vector index, graph, caches) are rebuildable from the log and are
   never authoritative.
-- **Artifacts** live under a local, git-ignored `var/` directory, content-addressed, and
-  referenced from run manifests.
+- **Artifacts** (`artifacts.ArtifactStore`) live under a local, git-ignored `var/`
+  directory: `objects/<hh>/<sha256 rest>` (read-only files, written atomically, re-hashed
+  on every read, never overwritten) plus an append-only `index.jsonl` of (digest, kind)
+  for discovery. A record artifact's bytes are its canonical JSON, so artifact digest =
+  record digest. A memory log is stored as its canonical JSONL export
+  (`MemoryLog.export()`), not as a SQLite file; `MemoryLog.load()` rebuilds it through
+  the validated append path, rejecting non-canonical or invalid lines.
 
 ## 7. Experimental Lifecycle
 
@@ -221,7 +284,7 @@ Every arrow is a recorded, replayable transformation.
 | 0 ✓ | Foundation: constitution, tooling, core records | CI green; invariants tested |
 | 1 ✓ | Operation log on SQLite; bitemporal state reconstruction ("state as of t") | Replay reproduces state bit-for-bit from the log |
 | 2 ✓ | Formation baselines + retrieval (lexical, recency); retrieval traces. Neural embeddings deferred (§9). | A response is traceable to exact version digests |
-| 3 | Experiment runner: manifests, seeds, datasets, interventions, artifact store | Re-running a manifest reproduces its artifacts |
+| 3 ✓ | Experiment runner: manifests, seeds, datasets, interventions, artifact store | Re-running a manifest reproduces its artifacts |
 | 4 | Evaluation: metrics, interval estimates, paired tests, failure taxonomy | Baseline vs. intervention comparison with CIs |
 | 5 | Provenance graph & memory autopsy | Full autopsy of any stored response |
 | 6 | API + observatory UI | UI renders only stored evidence |
@@ -246,3 +309,11 @@ Every arrow is a recorded, replayable transformation.
 | 2026-09-27 | Traces include every memory of the state, not only the selected ones. | Makes "why was X not returned" answerable. |
 | 2026-09-27 | Traces freeze the past (I14) instead of pinning a log position. | Keeps traces meaningful in pure time coordinates and reproducible by recomputation. |
 | 2026-09-27 | Scores are quantised to 12 decimal places; pipeline digests are pinned by a golden test. | Detects platform or semantic drift in stored results. |
+| 2026-09-27 | Interventions perturb datasets, never logs (I19). Rejected: branching or editing stored history to simulate perturbations. | Stored history stays immutable; every perturbation is itself a recorded, diffable artifact. |
+| 2026-09-27 | Seeded choices use SHA-256 `unit_interval` (I21). Rejected: `random.Random`. | Python does not guarantee `shuffle`/`sample` algorithms across versions, and a shared generator makes results depend on call order. |
+| 2026-09-27 | Probe expectations are epistemic and fixed on the authored dataset (I20). Rejected: recomputing truth per perturbed stream; deriving truth from a reference policy. | Recomputing hides degradation; policy-derived truth is circular. "Newer" is not "more true": occurrence, not ingestion, orders reports. |
+| 2026-09-27 | The log artifact is a canonical JSONL export. Rejected: storing the SQLite file. | SQLite's page layout is not a byte-level contract; the export is, and it round-trips through the validated append path. |
+| 2026-09-27 | The environment is a separate `Execution` record (I22). Rejected: including it (or wall-clock time) in the manifest or run record. | The same manifest must reproduce the same artifacts on any machine; where it ran is evidence, not identity. |
+| 2026-09-27 | Components are resolved by name with a round-trip check (I23). Rejected: pickled callables or code hashes in manifests. | Names with explicit versions are human-readable and stable; the round-trip check prevents a name silently meaning different parameters. |
+| 2026-09-27 | Rejected steps are recorded and the run continues. | A refusal by the log is a measured outcome, not a crash. |
+| 2026-09-27 | Runs record answers beside expectations but do not score them. | Matching answers to expectations (e.g. across content formats) is an evaluation decision for Phase 4. |

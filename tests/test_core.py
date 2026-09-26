@@ -5,6 +5,9 @@ from pydantic import ValidationError
 
 from memoria.core import (
     Belief,
+    Dataset,
+    Expectation,
+    ExpectationStatus,
     Experience,
     FormationDecision,
     FormationReason,
@@ -17,12 +20,15 @@ from memoria.core import (
     RetrieverSpec,
     SignalEvidence,
     SignalSpec,
+    Step,
+    StepOutcome,
     beliefs,
     check_citations,
     check_decision,
     content_hash,
     quantize,
     state_as_of,
+    unit_interval,
 )
 from memoria.retrieval import lexical_recency
 
@@ -490,3 +496,74 @@ def test_response_invariants() -> None:
         Response(trace=FAKE, responder="r", output=None, cited=(FAKE,))
     with pytest.raises(ValidationError, match="unique"):
         Response(trace=FAKE, responder="r", output="x", cited=(FAKE, FAKE))
+
+
+# --- Phase 3 records -----------------------------------------------------------------------
+
+
+def test_unit_interval_is_stateless_and_seeded() -> None:
+    a = unit_interval(1, "drop", FAKE)
+    assert a == unit_interval(1, "drop", FAKE)  # no hidden generator state
+    assert 0 <= a < 1
+    assert a != unit_interval(2, "drop", FAKE)
+    assert a != unit_interval(1, "delay", FAKE)
+    # Pinned: the value is a function of the arguments on every platform and version.
+    assert unit_interval(0, "x") == 0.7098306351812017
+    values = [unit_interval(3, i) for i in range(2000)]
+    assert 0.45 < sum(values) / len(values) < 0.55
+
+
+@pytest.mark.parametrize(
+    ("status", "values"),
+    [
+        (ExpectationStatus.KNOWN, ()),
+        (ExpectationStatus.KNOWN, ("a", "b")),
+        (ExpectationStatus.UNKNOWN, ("a",)),
+        (ExpectationStatus.CONTESTED, ("a",)),
+        (ExpectationStatus.CONTESTED, ("a", "a")),  # de-duplicated to one value
+    ],
+)
+def test_expectation_invariants(status: ExpectationStatus, values: tuple[str, ...]) -> None:
+    with pytest.raises(ValidationError):
+        Expectation(status=status, values=values)
+
+
+def test_expectation_values_are_canonical() -> None:
+    a = Expectation(status=ExpectationStatus.CONTESTED, values=("b", "a"))
+    assert a == Expectation(status=ExpectationStatus.CONTESTED, values=("a", "b"))
+
+
+def _step(at: int) -> Step:
+    return Step(experience=EXP, recorded_at=day(at))
+
+
+def test_dataset_invariants() -> None:
+    Dataset(name="d", version="1", steps=(_step(0), _step(0), _step(1)))
+    with pytest.raises(ValidationError, match="ingestion"):
+        Dataset(name="d", version="1", steps=(_step(1), _step(0)))
+    probe = {
+        "id": "p",
+        "text": "x",
+        "valid_at": T0,
+        "known_at": T0,
+        "expected": {"status": "unknown"},
+    }
+    with pytest.raises(ValidationError, match="unique"):
+        Dataset.model_validate({"name": "d", "version": "1", "steps": [], "probes": [probe, probe]})
+    with pytest.raises(ValidationError):
+        Dataset(name="", version="1", steps=())
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {},
+        {"decision": FAKE},
+        {"reason": FormationReason.NEW_KEY},
+        {"decision": FAKE, "reason": FormationReason.NEW_KEY, "rejected": "x"},
+        {"rejected": ""},
+    ],
+)
+def test_step_outcome_is_decision_xor_rejection(fields: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        StepOutcome.model_validate({"step": FAKE} | fields)

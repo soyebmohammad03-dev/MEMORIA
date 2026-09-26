@@ -16,47 +16,58 @@ back to its sources.
 
 ## Status
 
-**Phase 2 complete: formation, retrieval and traceable responses.** What exists today:
+**Phase 3 complete: reproducible experiments.** What exists today:
 
 - The project constitution and architecture ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md))
-- `memoria.core`: content-addressed, immutable records: experiences, bitemporal
-  hash-linked memory versions with create / update / correct / forget semantics, formation
-  decisions, queries, retrieval traces and responses, each with enforced invariants
-- `memoria.store`: an append-only SQLite log that validates every append and every
-  cross-record reference, rejects mutation at the database level, verifies digests on
-  read, and replays deterministically
-- `memoria.formation`: two deterministic baseline policies (`episodic-v1` stores raw
-  episodes; `statement-v1` maintains keyed memories from an explicit statement language)
-  whose every decision, including "change nothing", is recorded with a reason
-- `memoria.retrieval`: BM25 and recency signals with per-candidate evidence, a
-  fully-recorded ranking rule, and an extractive responder that abstains without evidence
-- `memoria.scenarios`: a deterministic year-long experience stream covering updates, late
-  reports, corrections, forgetting, relearning, conflicts, duplicates and noise
+- `memoria.core`: content-addressed, immutable records with enforced invariants:
+  experiences, bitemporal hash-linked memory versions (create / update / correct /
+  forget), formation decisions, retrieval traces, responses, datasets, probes with
+  epistemic ground truth (`known` / `unknown` / `contested`), manifests and run records
+- `memoria.store`: an append-only SQLite log that validates every append and reference,
+  verifies digests on read, and exports to / loads from canonical JSON Lines
+- `memoria.formation`: `episodic-v1` and `statement-v1` baseline policies, every decision
+  recorded with a reason
+- `memoria.retrieval`: BM25 and recency signals with per-candidate evidence, an
+  extractive responder that abstains without evidence
+- `memoria.interventions`: seeded `drop`, `delay`, `reorder`, `contaminate` and `inject`
+  perturbations of an experience stream
+- `memoria.artifacts`: a content-addressed, write-once local artifact store
+- `memoria.experiments`: a registry and runner that turn a manifest into artifacts, and a
+  `reproduce` check that re-runs a manifest and compares every artifact digest
+- `memoria.scenarios`: a hand-built year-long dataset and a seeded generator
+  (`drifting_facts`) with ground truth computed from the simulated world
 
-No neural embeddings, LLM providers, experiment runner, metrics, API or UI exist yet.
-The roadmap is in §8 of the architecture document. This README describes only what is
-implemented.
+Runs record answers next to expectations; scoring and statistics are Phase 4. No neural
+embeddings, LLM providers, API or UI exist yet. The roadmap is in §8 of the architecture
+document. This README describes only what is implemented.
 
 ```python
-from memoria.core import Query
-from memoria.formation import StatementPolicy, form
-from memoria.retrieval import answer, lexical
-from memoria.scenarios import day, relocation_year
-from memoria.store import MemoryLog
+from memoria.artifacts import ArtifactStore
+from memoria.core import InterventionSpec, RunManifest, RunOutcomes
+from memoria.experiments import execute, reproduce
+from memoria.retrieval import EXTRACTIVE, lexical_recency
+from memoria.scenarios import drifting_facts
 
-with MemoryLog(":memory:") as log:  # or a file path
-    for step in relocation_year():
-        form(log, step.experience, StatementPolicy(), recorded_at=step.recorded_at)
-
-    # The user moved on day 55; the system learned it on day 60.
-    for known in (59, 60):
-        q = Query(text="where is home", valid_at=day(57), known_at=day(known), limit=1)
-        trace, response = answer(log, lexical(), q)
-        print(known, response.output, response.cited)  # 59: Paris, 60: Berlin
-
-    top = trace.candidates[0]  # why it was chosen: every signal's score and raw inputs
-    print(top.total, top.signals[0].inputs)
-    print(log.version(response.cited[0]).derived_from)  # the experience(s) behind it
+store = ArtifactStore("var/artifacts")
+dataset = store.put_record(drifting_facts(seed=7))
+manifest = RunManifest(
+    name="contamination-1d",
+    dataset=dataset,
+    interventions=(
+        InterventionSpec(
+            name="contaminate",
+            params=(("delay_days", 1), ("rate", 0.5), ("seed", 1), ("source", "contaminant")),
+        ),
+    ),
+    policy="statement-v1",
+    retriever=lexical_recency().spec,
+    responder=EXTRACTIVE,
+)
+run = execute(manifest, store)  # every artifact is stored and named by digest
+outcomes = store.get_record(RunOutcomes, run.outcomes)
+for probe in outcomes.probes[:3]:
+    print(probe.probe, probe.output, probe.expected.status, probe.expected.values)
+print(reproduce(run.digest, store).reproduced)  # True: same manifest, same artifacts
 ```
 
 ## Research areas (planned)

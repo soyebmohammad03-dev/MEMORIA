@@ -110,7 +110,9 @@ EXPECTED = [
 
 
 def run(log: MemoryLog, policy: FormationPolicy) -> list[FormationDecision]:
-    return [form(log, s.experience, policy, recorded_at=s.recorded_at) for s in relocation_year()]
+    return [
+        form(log, s.experience, policy, recorded_at=s.recorded_at) for s in relocation_year().steps
+    ]
 
 
 def test_relocation_year_outcomes(log: MemoryLog) -> None:
@@ -295,7 +297,7 @@ def test_record_time_cannot_go_backwards_through_skips(log: MemoryLog) -> None:
 
 def test_episodic_stores_every_distinct_experience(log: MemoryLog) -> None:
     decisions = run(log, EpisodicPolicy())
-    distinct = {s.experience.digest for s in relocation_year()}
+    distinct = {s.experience.digest for s in relocation_year().steps}
     created = [d for d in decisions if d.reason is R.NEW_EPISODE]
     assert len(created) == len(distinct) == len(log.versions())
     assert [d.reason for d in decisions].count(R.DUPLICATE_EXPERIENCE) == 1

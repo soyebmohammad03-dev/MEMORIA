@@ -515,3 +515,165 @@ def check_response(response: Response, trace: RetrievalTrace) -> None:
         raise InvalidTransitionError("response: trace does not match")
     if not set(response.cited) <= set(trace.selected):
         raise InvalidTransitionError("response: cites a version the retrieval did not select")
+
+
+# --- experiments: seeded randomness, datasets, interventions, runs -------------------------
+
+
+def unit_interval(seed: int, *labels: Scalar) -> float:
+    """A reproducible pseudo-random number in [0, 1), derived from ``(seed, *labels)``.
+
+    Stateless and platform-independent (SHA-256 of canonical JSON): the value depends
+    only on its arguments, never on call order or a global generator.
+    """
+    h = hashlib.sha256(canonical_json([seed, *labels]).encode("utf-8")).digest()
+    return int.from_bytes(h[:8], "big") / 2**64
+
+
+class Step(Record):
+    """One experience and the record time at which a system under study ingests it."""
+
+    experience: Experience
+    recorded_at: UTCDatetime
+
+
+class ExpectationStatus(StrEnum):
+    KNOWN = "known"  # exactly one value is supported by the evidence
+    UNKNOWN = "unknown"  # nothing is supported: never learned, forgotten, or not yet known
+    CONTESTED = "contested"  # the evidence supports several values and does not decide
+
+
+class Expectation(Record):
+    """Ground truth for a probe: what an ideal system could hold, given the evidence.
+
+    It is *epistemic*: judged from the experiences recorded by the probe's ``known_at``,
+    not from facts the system could not yet have observed.
+    """
+
+    status: ExpectationStatus
+    values: Annotated[tuple[str, ...], AfterValidator(_canonical_set)] = ()
+
+    @model_validator(mode="after")
+    def _check_invariants(self) -> Self:
+        needed = {
+            ExpectationStatus.KNOWN: len(self.values) == 1,
+            ExpectationStatus.UNKNOWN: not self.values,
+            ExpectationStatus.CONTESTED: len(self.values) >= 2,
+        }
+        if not needed[self.status]:
+            raise ValueError(
+                f"{self.status.value}: needs 1 value (known), 0 (unknown) or >=2 (contested)"
+            )
+        return self
+
+
+class Probe(Record):
+    """A question asked of the memory system after ingestion, with its expected answer."""
+
+    id: str = Field(min_length=1)
+    text: str
+    valid_at: UTCDatetime
+    known_at: UTCDatetime
+    limit: int = Field(default=1, ge=1)
+    expected: Expectation
+
+    @property
+    def query(self) -> Query:
+        return Query(
+            text=self.text, valid_at=self.valid_at, known_at=self.known_at, limit=self.limit
+        )
+
+
+class Dataset(Record):
+    """A named, versioned experience stream (in ingestion order) plus probes."""
+
+    name: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    steps: tuple[Step, ...]
+    probes: tuple[Probe, ...] = ()
+
+    @model_validator(mode="after")
+    def _check_invariants(self) -> Self:
+        times = [s.recorded_at for s in self.steps]
+        if times != sorted(times):
+            raise ValueError("steps must be in non-decreasing recorded_at (ingestion) order")
+        ids = [p.id for p in self.probes]
+        if len(set(ids)) != len(ids):
+            raise ValueError("probe ids must be unique")
+        return self
+
+
+class InterventionSpec(Record):
+    """A named intervention and every parameter (including seeds) that determines it."""
+
+    name: str = Field(min_length=1)
+    params: Inputs = ()
+
+
+class InterventionRecord(Record):
+    """What an intervention did: its spec, input and output datasets, and the step diff."""
+
+    spec: InterventionSpec
+    input: Digest
+    output: Digest
+    removed: tuple[Digest, ...]  # step digests, sorted; multiset difference input - output
+    added: tuple[Digest, ...]  # step digests, sorted; multiset difference output - input
+
+
+class RunManifest(Record):
+    """Everything that determines a run. Its digest is the run ID.
+
+    Components are named with explicit versions (``statement-v1``, ``bm25``...); those
+    names, their recorded parameters, and the dataset digest are the reproducibility
+    contract. The execution environment is recorded separately and is not part of it.
+    """
+
+    name: str = Field(min_length=1)
+    dataset: Digest
+    interventions: tuple[InterventionSpec, ...] = ()
+    policy: str = Field(min_length=1)
+    retriever: RetrieverSpec
+    responder: str = Field(min_length=1)
+
+
+class StepOutcome(Record):
+    """How the system under study handled one step: a recorded decision, or a rejection."""
+
+    step: Digest
+    decision: Digest | None = None
+    reason: FormationReason | None = None
+    rejected: str | None = None  # the rejection message, if the log refused the step
+
+    @model_validator(mode="after")
+    def _check_invariants(self) -> Self:
+        decided = self.decision is not None and self.reason is not None
+        undecided = self.decision is None and self.reason is None
+        if not ((decided and self.rejected is None) or (undecided and self.rejected)):
+            raise ValueError("a step outcome is either a decision with a reason or a rejection")
+        return self
+
+
+class ProbeOutcome(Record):
+    """A probe's recorded answer next to its expectation. Scoring is not done here."""
+
+    probe: str
+    trace: Digest
+    response: Digest
+    output: str | None
+    cited: tuple[Digest, ...]
+    expected: Expectation
+
+
+class RunOutcomes(Record):
+    steps: tuple[StepOutcome, ...]
+    probes: tuple[ProbeOutcome, ...]
+
+
+class RunRecord(Record):
+    """The deterministic result of executing a manifest: digests of every artifact."""
+
+    manifest: Digest
+    dataset: Digest  # the effective dataset, after interventions
+    interventions: tuple[Digest, ...]  # InterventionRecord artifacts, in application order
+    log: Digest  # canonical export of the resulting memory log
+    outcomes: Digest  # RunOutcomes artifact

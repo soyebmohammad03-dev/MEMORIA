@@ -36,7 +36,7 @@ QUESTIONS = [
 def build(path: Path, policy: FormationPolicy) -> list[str]:
     """Form the scenario, ask every question; return all record digests in order."""
     with MemoryLog(path) as log:
-        for step in relocation_year():
+        for step in relocation_year().steps:
             form(log, step.experience, policy, recorded_at=step.recorded_at)
         for text, valid, known in QUESTIONS:
             q = Query(text=text, valid_at=day(valid), known_at=day(known), limit=3)

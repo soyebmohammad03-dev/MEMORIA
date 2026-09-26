@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import ClassVar, Literal, Protocol
@@ -231,12 +231,17 @@ def extractive(trace: RetrievalTrace, state: MemoryState) -> Response:
     )
 
 
-def answer(log: MemoryLog, retriever: Retriever, query: Query) -> tuple[RetrievalTrace, Response]:
+Responder = Callable[[RetrievalTrace, MemoryState], Response]
+
+
+def answer(
+    log: MemoryLog, retriever: Retriever, query: Query, responder: Responder = extractive
+) -> tuple[RetrievalTrace, Response]:
     """Retrieve from the log's state at the query's coordinates, respond, record both."""
     with log.transaction():
         state = log.state_as_of(valid_at=query.valid_at, known_at=query.known_at)
         trace = retriever.retrieve(state, query)
-        response = extractive(trace, state)
+        response = responder(trace, state)
         log.append_record(trace)
         log.append_record(response)
     return trace, response

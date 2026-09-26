@@ -423,3 +423,68 @@ def test_lookups_by_digest(log: MemoryLog) -> None:
     assert log.record(Response, response.digest) == response
     assert log.record(Response, trace.digest) is None  # right digest, wrong kind
     assert log.version("sha256:" + "3" * 64) is None
+
+
+# --- Phase 3: canonical export / load -------------------------------------------------------
+
+
+def test_export_load_roundtrip_is_byte_identical(tmp_path: Path) -> None:
+    with MemoryLog(tmp_path / "a.db") as log:
+        populate(log)
+        _ask(log, 10)  # a trace recorded before later versions exist ...
+        log.append_version(create("pet", "dog", PARIS, 50))  # ... then more history
+        _ask(log, 60, "dog")
+        data = log.export()
+        expected_states = states(log)
+    with MemoryLog.load(data, tmp_path / "b.db") as copy:
+        copy.verify()
+        assert copy.export() == data
+        assert states(copy) == expected_states
+        assert len(copy.records(RetrievalTrace)) == 2
+
+
+def test_export_is_canonical_jsonl(log: MemoryLog) -> None:
+    populate(log)
+    _ask(log, 10)
+    lines = log.export().decode().splitlines()
+    kinds = [line.split('"kind":"')[1].split('"')[0] for line in lines]
+    assert kinds[:3] == ["experience"] * 3
+    assert kinds[-2:] == ["retrieval_trace", "response"]
+    assert log.export().endswith(b"\n")
+
+
+def test_empty_log_exports_nothing(log: MemoryLog) -> None:
+    assert log.export() == b""
+    with MemoryLog.load(b"") as empty:
+        assert empty.versions() == []
+
+
+def _exported(log: MemoryLog) -> list[str]:
+    populate(log)
+    return log.export().decode().splitlines()
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda lines: [*lines, "not json"], "not a valid log entry"),
+        (lambda lines: [*lines, '{"kind":"alien","record":{}}'], "not a valid log entry"),
+        (lambda lines: [lines[0].replace(",", ", ")], "canonical"),
+        (lambda lines: lines[1:], "unknown experience"),  # a version cites a missing experience
+        (lambda lines: [*lines[:3], lines[4], lines[3], *lines[5:]], "record time"),
+        (lambda lines: [lines[0].replace("Paris", "Rome"), *lines[1:]], "unknown experience"),
+    ],
+    ids=["garbage", "unknown-kind", "non-canonical", "missing-ref", "reordered", "tampered"],
+)
+def test_load_rejects_bad_exports(log: MemoryLog, mutate: object, message: str) -> None:
+    bad = "\n".join(mutate(_exported(log))) + "\n"  # type: ignore[operator]
+    with pytest.raises(LogIntegrityError, match=message):
+        MemoryLog.load(bad.encode())
+
+
+def test_load_requires_an_empty_target(tmp_path: Path) -> None:
+    with MemoryLog(tmp_path / "t.db") as log:
+        populate(log)
+        data = log.export()
+    with pytest.raises(LogIntegrityError, match="empty log"):
+        MemoryLog.load(data, tmp_path / "t.db")

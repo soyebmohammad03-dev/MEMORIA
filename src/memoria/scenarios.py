@@ -1,17 +1,30 @@
-"""Deterministic research scenarios: small, realistic long-horizon experience streams.
+"""Deterministic research datasets: experience streams with probes and ground truth.
 
-Each step is an experience plus the record time at which the system ingests it.
-Contents follow the statement language of :class:`memoria.formation.StatementPolicy`
-interleaved with ordinary chatter, so the same stream exercises every formation
-outcome under that policy and serves as unstructured episodes for others.
+Contents follow the statement language of :class:`memoria.formation.StatementPolicy`,
+so the same stream exercises every formation outcome under that policy and serves as
+unstructured episodes for others.
+
+Probe expectations are *epistemic*: what an ideal system could believe about
+``valid_at`` given every experience recorded by ``known_at``. They are independent of
+any policy, which is what makes a policy's behaviour measurable against them. Under
+that standard the most recent report *by occurrence* holds; later ingestion does not
+make a report more true.
 """
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
-from typing import NamedTuple
 
-from memoria.core import Experience
+from memoria.core import (
+    Dataset,
+    Expectation,
+    ExpectationStatus,
+    Experience,
+    Probe,
+    Step,
+    unit_interval,
+)
 
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -20,25 +33,35 @@ def day(n: float) -> datetime:
     return EPOCH + timedelta(days=n)
 
 
-class Step(NamedTuple):
-    experience: Experience
-    recorded_at: datetime
+def known(value: str) -> Expectation:
+    return Expectation(status=ExpectationStatus.KNOWN, values=(value,))
+
+
+UNKNOWN = Expectation(status=ExpectationStatus.UNKNOWN)
+
+
+def contested(*values: str) -> Expectation:
+    return Expectation(status=ExpectationStatus.CONTESTED, values=values)
 
 
 def _step(occurred: float, content: str, source: str, recorded: float | None = None) -> Step:
     return Step(
-        Experience(source=source, content=content, occurred_at=day(occurred)),
-        day(occurred if recorded is None else recorded),
+        experience=Experience(source=source, content=content, occurred_at=day(occurred)),
+        recorded_at=day(occurred if recorded is None else recorded),
     )
 
 
-def relocation_year() -> list[Step]:
+def _probe(pid: str, text: str, valid: float, known_at: float, expected: Expectation) -> Probe:
+    return Probe(id=pid, text=text, valid_at=day(valid), known_at=day(known_at), expected=expected)
+
+
+def relocation_year() -> Dataset:
     """One user over a year: moves, a job misremembered then corrected, a forgotten and
     relearned employer, late and conflicting reports, duplicates and malformed input.
 
     The comment on each step is the outcome ``statement-v1`` records for it.
     """
-    return [
+    steps = (
         _step(0, "set home = Paris", "chat:0"),  # NEW_KEY
         _step(3, "set employer = Acme", "chat:3"),  # NEW_KEY
         _step(5, "We had pasta for lunch near the office.", "chat:5"),  # UNPARSED
@@ -55,4 +78,110 @@ def relocation_year() -> list[Step]:
         _step(310, "forget home = Hamburg", "chat:310"),  # UNPARSED (forget takes no value)
         _step(330, "set pet = dog", "chat:330"),  # NEW_KEY
         _step(340, "Remind me where I live these days?", "chat:340"),  # UNPARSED
-    ]
+    )
+    probes = (
+        _probe("home-57-before-report", "where is home", 57, 59, known("Paris")),
+        _probe("home-57-after-report", "where is home", 57, 61, known("Berlin")),
+        # The late Munich report (occurred day 50) is older than the Berlin move (55).
+        _probe("home-100", "where is home", 100, 100, known("Berlin")),
+        # Two reports for the same instant: the evidence does not decide.
+        _probe("home-345", "where is home", 345, 345, contested("Bremen", "Hamburg")),
+        _probe("employer-10-before-correction", "employer", 10, 60, known("Acme")),
+        _probe("employer-10-after-correction", "employer", 10, 70, known("Globex")),
+        # An ideal system honours "forget": nothing is held until the employer is relearned.
+        _probe("employer-175-forgotten", "employer", 175, 175, UNKNOWN),
+        _probe("employer-345-relearned", "employer", 345, 345, known("Initech")),
+        _probe("pet-345", "pet", 345, 345, known("dog")),
+        # "correct pet = cat" still asserts cat, though statement-v1 had nothing to correct.
+        _probe("pet-260-correct-without-memory", "pet", 260, 260, known("cat")),
+        _probe("unrelated", "zebra", 345, 345, UNKNOWN),
+        _probe("before-anything", "home", 0, -1, UNKNOWN),
+    )
+    return Dataset(name="relocation-year", version="1", steps=steps, probes=probes)
+
+
+def _minutes(days: float) -> timedelta:
+    """Whole minutes, so generated times never depend on float formatting."""
+    return timedelta(minutes=round(days * 1440))
+
+
+def drifting_facts(
+    seed: int,
+    *,
+    keys: int = 4,
+    changes: int = 5,
+    horizon_days: float = 365,
+    max_delay_days: float = 10,
+    probes_per_key: int = 6,
+) -> Dataset:
+    """A seeded long-horizon stream: each key's value changes over time; every change is
+    reported once, as ``set <key> = <value>``, after a random ingestion delay.
+
+    Delays let reports arrive out of occurrence order, so a system that ignores late
+    reports (``statement-v1`` records them as STALE) diverges from the ground truth.
+    Probe times are drawn uniformly; ``known_at`` lies up to twice the maximum delay
+    after ``valid_at``, so some probes precede the report they would need.
+    """
+    if min(keys, changes, probes_per_key) < 1 or horizon_days <= 0 or max_delay_days < 0:
+        raise ValueError("keys, changes and probes_per_key >= 1; horizon > 0; delay >= 0")
+
+    def u(*labels: str | int) -> float:
+        return unit_interval(seed, "drifting-facts", *labels)
+
+    steps: list[Step] = []
+    reports: dict[str, list[tuple[datetime, datetime, str]]] = defaultdict(list)
+    for k in range(keys):
+        key = f"k{k}"
+        times = sorted(u(key, "change", c) * horizon_days for c in range(changes))
+        for c, t in enumerate(times):
+            value = f"{key}v{c}"
+            occurred = EPOCH + _minutes(t)
+            recorded = occurred + _minutes(u(key, "delay", c) * max_delay_days)
+            steps.append(
+                Step(
+                    experience=Experience(
+                        source=f"world:{key}:{c}",
+                        content=f"set {key} = {value}",
+                        occurred_at=occurred,
+                    ),
+                    recorded_at=recorded,
+                )
+            )
+            reports[key].append((occurred, recorded, value))
+
+    probes = []
+    for k in range(keys):
+        key = f"k{k}"
+        for p in range(probes_per_key):
+            valid = EPOCH + _minutes(u(key, "probe-valid", p) * horizon_days)
+            known_at = valid + _minutes(u(key, "probe-known", p) * 2 * max_delay_days)
+            probes.append(
+                Probe(
+                    id=f"{key}-{p}",
+                    text=key,
+                    valid_at=valid,
+                    known_at=known_at,
+                    expected=epistemic_truth(reports[key], valid_at=valid, known_at=known_at),
+                )
+            )
+    steps.sort(key=lambda s: (s.recorded_at, s.digest))
+    return Dataset(
+        name="drifting-facts",
+        version=f"1:seed={seed}:keys={keys}:changes={changes}:horizon={horizon_days}"
+        f":delay={max_delay_days}:probes={probes_per_key}",
+        steps=tuple(steps),
+        probes=tuple(probes),
+    )
+
+
+def epistemic_truth(
+    reports: list[tuple[datetime, datetime, str]], *, valid_at: datetime, known_at: datetime
+) -> Expectation:
+    """Among reports (occurred, recorded, value) recorded by ``known_at`` that occurred by
+    ``valid_at``, the latest by occurrence holds; a tie between values is contested."""
+    visible = [(o, v) for o, r, v in reports if r <= known_at and o <= valid_at]
+    if not visible:
+        return UNKNOWN
+    latest = max(o for o, _ in visible)
+    values = {v for o, v in visible if o == latest}
+    return known(values.pop()) if len(values) == 1 else contested(*values)

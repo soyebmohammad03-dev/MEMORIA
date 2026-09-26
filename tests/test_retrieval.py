@@ -235,7 +235,7 @@ def test_custom_signal_plugs_in_without_core_changes() -> None:
 @pytest.fixture
 def statement_log() -> Iterator[MemoryLog]:
     with MemoryLog(":memory:") as log:
-        for step in relocation_year():
+        for step in relocation_year().steps:
             form(log, step.experience, StatementPolicy(), recorded_at=step.recorded_at)
         yield log
 
@@ -259,7 +259,7 @@ def test_answers_follow_both_time_axes(statement_log: MemoryLog) -> None:
 def test_episodic_baseline_exhibits_interference() -> None:
     """Measured behaviour, not a target: raw episodes let stale reports win."""
     with MemoryLog(":memory:") as log:
-        for step in relocation_year():
+        for step in relocation_year().steps:
             form(log, step.experience, EpisodicPolicy(), recorded_at=step.recorded_at)
         q = Query(text="where is home", valid_at=day(100), known_at=day(100), limit=3)
         trace, response = answer(log, lexical(), q)
