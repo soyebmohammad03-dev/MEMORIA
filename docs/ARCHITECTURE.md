@@ -116,6 +116,12 @@ These are enforced in code and tests, not by convention.
 | I31 | Vectors from different embedder specs are never compared: loading, searching or verifying an index with another embedder is refused. |
 | I32 | A semantic index binds its embedder spec, source state, entries, preprocessed-text digests and vector artifact by digest; rebuilding from the source state reproduces the vectors (bit-for-bit for deterministic embedders). |
 | I33 | Manifest schema evolution never changes the digest of an existing manifest (§4.7). |
+| I34 | A spec that names a model pins it completely: provider, immutable revision, the size and SHA-256 of every file its output depends on, pooling, maximum tokens, truncation, runtime, batch size and tolerance. Licence and descriptions are metadata, not identity. |
+| I35 | Model files are verified against the spec before any inference; nothing is downloaded implicitly (only the explicit `fetch_model`). |
+| I36 | No silent substitution: an unregistered, missing or unverifiable embedder or index backend is an error, never a fallback, and nothing is stored for a run that could not use what its manifest declares. |
+| I37 | Reproduction is classified, never assumed: *identical* (bytes), *equivalent* (within the spec's declared tolerance), or *different*. Deterministic embedders declare no tolerance, so only identity passes. |
+| I38 | The exact index is the reference. An approximate index only proposes candidates; every reported similarity is the exact cosine, and what the approximation loses is measured. |
+| I39 | A comparison accounts for every manifest field: the retriever and its representation form one variable ("retrieval"), and a manifest field no variable covers is an error. |
 
 Tooling standard: Python ≥3.12, Pydantic v2, `mypy --strict`, Ruff, pytest with warnings
 as errors, `uv` with a committed lockfile, CI on every push.
@@ -145,8 +151,12 @@ as errors, `uv` with a committed lockfile, CI on every push.
 | **Classification** | A probe outcome class, the rule that fired, the failure locus, and the claims used. | `taxonomy.py` |
 | **Measurement** | A metric value with n, interval, the probes counted, and (via its `Evaluation`) the run it came from. | `evaluation.py`, `statistics.py` |
 | **Evaluation / RunComparison** | All probe judgements and measurements for one run; a paired baseline-vs-treatment comparison of two evaluations. | `evaluation.py` |
-| **Embedder / EmbedderSpec** | Text → fixed-dimension vectors under a recorded identity; `HashedNgramEmbedder` is the deterministic lexical-subword reference (not semantic). | `embeddings.py` |
-| **Semantic index** | Embeddings of a memory state as a stored, verifiable artifact with exact cosine search. | `semantic.py` |
+| **Embedder / EmbedderSpec** | Text → fixed-dimension vectors under a recorded identity; `HashedNgramEmbedder` is the deterministic lexical-subword reference (not semantic). | `embeddings.py`, `core.py` |
+| **ModelIdentity / Tolerance** | Exactly which model bytes produce vectors; when two outputs of one spec count as equivalent. | `core.py` |
+| **NeuralSentenceEmbedder** | A local transformer sentence encoder (ONNX Runtime, CPU) behind the embedder contract; the reference model is MiniLM-L6. An experimental representation, not ground truth. | `neural.py` |
+| **RepresentationSpec / IndexSpec** | A retrieval representation: embedder plus index (exact, or HNSW via FAISS). Declared in manifest schema v2. | `core.py` |
+| **Semantic index** | Embeddings of a memory state as a stored, verifiable artifact; exact search, optional approximate candidate generation. | `semantic.py`, `vectors.py` |
+| **Semantic experiment** | A content-addressed comparison of representations on a labelled diagnostic, with timings recorded separately. | `semantic_eval.py` |
 | **Autopsy** | The provenance DAG from a response back through retrieval → versions → operations → experiences, at a point in both time axes. | Phase 17 |
 
 The `update`/`correct` distinction is deliberate: it separates *temporal change* from
@@ -344,36 +354,113 @@ comparisons. The fact model is the statement language: datasets without it are c
 on text, but claim-based classes cannot apply. The mention reader recognises only values
 asserted somewhere in the dataset.
 
-### 4.6 Semantic memory semantics (Phase 5, slice 1)
+### 4.6 Semantic memory semantics (Phase 5)
 
-`embeddings.embed(embedder, texts)` applies the spec's `Preprocessing` (NFKC, case
-folding, whitespace collapse, optional truncation — each recorded), encodes, and
-validates. `HashedNgramEmbedder` hashes character n-grams of the preprocessed text with
-SHA-256 into signed buckets and L2-normalises the integer counts; empty text is the zero
-vector. It captures spelling, not meaning.
+**Embedders.** `embeddings.embed(embedder, texts)` applies the spec's `Preprocessing`
+(NFKC, case folding, whitespace collapse, optional truncation — each recorded), encodes,
+and validates count, dimensionality, finiteness and declared normalisation.
 
-`semantic.SemanticIndex.build(state, embedder, store)` stores the `MemoryState` and a
-little-endian float32 vector blob, and an `IndexManifest`. `search(text, k, embedder)`
-returns `Neighbor`s ranked by quantised cosine over the stored float32 vectors, ties by
-`memory_id` then version digest; zero vectors have similarity 0. `load` refuses a
-different embedder; `verify` re-embeds the source state and requires identical texts
-and bytes. Search is exact (brute force); approximate indexes must be validated against
-it. Semantic signals do not yet enter retrieval ranking (Phase 6).
+- `HashedNgramEmbedder` (`hashed-char-ngrams` v1): signed SHA-256 feature hashing of
+  character n-grams, L2-normalised integer counts; empty text is the zero vector. It
+  captures spelling, not meaning, and is byte-deterministic everywhere. It is the control
+  condition for every semantic experiment.
+- `NeuralSentenceEmbedder` (`onnx-sentence` v1): tokenise with the model's own tokenizer,
+  truncating right at `max_tokens`; run the encoder on the CPU (ONNX Runtime, one thread,
+  sequential, one text per batch so padding never depends on neighbours); mean-pool over
+  the attention mask (or take the first token, for `cls`); L2-normalise. The reference
+  model is `sentence-transformers/all-MiniLM-L6-v2` pinned by revision and file hashes
+  (`neural.MINILM`). Its preprocessing applies NFKC and whitespace collapse but not case
+  folding, because the model's tokenizer lowercases. The adapter reproduces the published
+  sentence-transformers pipeline to 3.5e-7 per component (docs/experiments/phase5-semantic.md).
+  ONNX Runtime's POSIX build contains an HTTP telemetry client (Microsoft 1DS). The adapter
+  sets `ORT_DISABLE_TELEMETRY=1` before onnxruntime initialises and also calls
+  `disable_telemetry_events()`. If a host application imports onnxruntime before MEMORIA
+  without the variable, only the second switch applies; set the variable in the
+  environment to be certain.
 
-### 4.7 Experiment degrees of freedom and manifest evolution
+A neural embedding is an **experimental representation, not ground truth**: it encodes
+the model's notion of similarity, which the Phase 5 study shows tracks topic rather than
+truth (numeric changes and contradictions score like paraphrases). Similarities are not
+understanding.
+
+**Indexes.** `semantic.SemanticIndex.build(state, embedder, store, index)` stores the
+`MemoryState`, a little-endian float32 vector blob, any serialised approximate index, and
+an `IndexManifest` binding embedder spec, index spec, source state, entries (in state
+order — the insertion order), memory ids and preprocessed-text digests. `search` returns
+`Neighbor`s carrying rank, exact quantised cosine, version, text digest, source state,
+index and embedder digests, and the representation used; ties by `memory_id`, then
+digest. `similarities` gives the exact cosine to every entry. `load` and `search` refuse a
+different embedder; `require_source` refuses a stale index; `verify` re-embeds the source
+state and classifies the vectors under I37.
+
+**Exact versus approximate.** `vectors.HnswIndex` (FAISS `IndexHNSWFlat` over inner
+product on normalised vectors; one thread; FAISS's fixed internal seed; FAISS default
+parameters M = 16, efConstruction = 40, efSearch = 16) proposes candidates, which are
+re-scored exactly (I38). `semantic_eval.compare_indexes` reports recall@k, top-1
+agreement, rank displacement and the exact items lost; build time, latency and size are
+in performance records.
+
+**In runs.** `retrieval.SemanticSignal` scores every memory of the queried state by exact
+cosine under the manifest's embedder (score = max(cosine, 0), raw cosine recorded; as a
+gate, eligible iff cosine > 0 — orthogonality, not a tuned threshold). Because a signal
+must score every memory, runs use the exact index; approximate candidate generation in
+ranking belongs to Phase 6.
+
+### 4.7 Experiment degrees of freedom and manifest schema v2
 
 The target experiment model varies, independently and explicitly: memory architecture,
 formation policy, consolidation policy, retrieval policy, forgetting policy, source
 model, embedding model, reranker, dataset, interventions, and evaluation specification.
-Today's `RunManifest` records dataset, interventions, policy, retriever and responder;
-evaluation specs are recorded by `Evaluation`.
 
-Rule for adding degrees of freedom (I33): a new manifest field must have a default that
-reproduces current behaviour, and a field at its default is omitted from the canonical
-form, so every existing manifest keeps its digest and every existing run keeps its ID.
-This "manifest schema v2" is implemented with the first phase that adds a degree of
-freedom to runs (the embedding model, completing Phase 5), not before. Nothing that
-changes results may live in global configuration.
+`RunManifest` records dataset, interventions, formation policy, retriever, responder and,
+since schema v2, `representation` (a `RepresentationSpec`: embedder spec — provider,
+model identity and configuration, dimensions — and index spec: kind, backend,
+parameters). Evaluation specs are recorded by `Evaluation`.
+
+Schema evolution (I33) uses `core.ExtensibleRecord`: fields listed in `_evolved` are
+omitted from every serialisation while at their default, recursively, so a v1 manifest
+keeps its digest and run ID (verified against digests computed by the pre-v2 code). The
+same mechanism extends `EmbedderSpec` (neural fields) and `IndexManifest` (index kind,
+approximate artifact). A new evolved field must default to the prior behaviour.
+
+The runner enforces that a representation is declared iff a retriever signal uses
+vectors, that its embedder is registered and rebuilds to the declared spec, and that
+runs use the exact index. Comparisons treat retriever and representation as one variable,
+"retrieval" (I39). Nothing that changes results may live in global configuration; the
+model directory is execution environment (`MEMORIA_MODELS`), verified against the spec.
+
+### 4.8 Reproducibility boundaries and tolerance
+
+| Artifact | Guarantee |
+|---|---|
+| Records, datasets, logs, traces, evaluations | byte-identical everywhere |
+| Reference embeddings and their indexes | byte-identical everywhere (integer counts, one correctly rounded division) |
+| Neural embeddings on one machine and runtime | byte-identical run to run (verified) |
+| Neural embeddings across runtimes or hardware | equivalent within the declared tolerance |
+| HNSW graphs | a deterministic function of vectors, order and parameters; rebuilt byte-identically when vectors are identical |
+| Timings, memory, sizes on disk | environment-bound; recorded separately, never in a result's identity |
+
+Tolerance for `onnx-sentence` MiniLM: every component within 1e-4 and cosine ≥ 0.9999
+between corresponding vectors. Rationale: float32 inference differs across CPU kernels
+and runtime versions in the last bits; measured ONNX Runtime versus PyTorch differences
+are ≤ 3.5e-7, so the bound has ~300× margin. For unit vectors it implies similarities move
+by at most 2·√d·max_abs ≈ 0.004, below the gaps that separate ranks in the Phase 5 study.
+Cross-hardware equivalence has not yet been measured (CI does not download models); it
+is a stated hypothesis until it is.
+
+### 4.9 Semantic diagnostic methodology
+
+`scenarios.semantic_diagnostic()` is a controlled probe, not a benchmark: 51 memories
+about seven subjects, each with variants labelled by designed relationship (paraphrase,
+equivalent wording, other source, temporal variant, contradiction, negation, numeric
+change, entity substitution, lexical distractor, shared vocabulary) and two queries per
+subject (worded, reworded). Relevance is topical: about the query's subject and
+attribute. `semantic_eval.run_semantic_experiment` separates **representation quality**
+(similarity profiles per label; separation of meaning-preserving from meaning-changing
+variants) from **retrieval quality** (recall and precision at k with Wilson intervals and
+the attainable maximum, reciprocal rank, false matches and misses by label, paired
+Newcombe/McNemar differences, top-k overlap). Paired items share queries, so intervals
+may be optimistic. Results: docs/experiments/phase5-semantic.md.
 
 ## 5. Module Boundaries
 
@@ -395,7 +482,10 @@ taxonomy      claims, relations, outcome classification  (exists)
 statistics    Wilson, Newcombe paired, exact McNemar, Holm  (exists)
 evaluation    evaluations, measurements, paired comparisons  (exists)
 embeddings    embedding contract, preprocessing, reference embedder  (exists)
-semantic      semantic index artifacts, exact search  (exists)
+semantic      semantic index artifacts, exact search, approximate candidates  (exists)
+neural        local neural embedder adapter, pinned model identities  (exists; extra 'neural')
+vectors       FAISS HNSW candidate generation  (exists; extra 'ann')
+semantic_eval representation experiments, exact-vs-ANN, scaling  (exists)
 provenance    autopsy / provenance graph (NetworkX)
 api           FastAPI surface over the above (no logic of its own)
 observatory   interactive visualisation (consumes api only)
@@ -441,7 +531,10 @@ introduced **when the first implementation is written** (not as empty scaffoldin
 - `experiments.Registry` — resolves manifest names; `extend()` adds components, never
   redefines them
 - `embeddings.Embedder` — text → vectors under an `EmbedderSpec` (exists:
-  `hashed-char-ngrams`; neural adapters behind an optional extra, pending)
+  `hashed-char-ngrams`; `onnx-sentence` behind the `neural` extra). Registered via
+  `Registry.extend(embedders=...)`; `neural.neural_embedders()` provides the neural entry.
+- `neural.TransformerBackend` — tokeniser plus encoder under the neural adapter (exists:
+  `OnnxBackend`)
 - `Dataset` (a record, not a protocol: any generator producing one plugs in)
 - Evaluation components are versioned names in `EvaluationSpec` (`tokens-v1`,
   `provenance-v1`, readers). One implementation each exists, so there is no registry;
@@ -464,6 +557,11 @@ runner**, only a new implementation and its registration in a manifest.
   Identical records are idempotent (same content address = same observation).
 - **Derived indexes** (vector index, graph, caches) are rebuildable from the log and are
   never authoritative.
+- **Model files** are not artifacts: they live in the execution environment
+  (`MEMORIA_MODELS`, default `~/.cache/memoria/models/<name>/<revision>`) and are verified
+  against the spec's pinned sizes and SHA-256 digests before use.
+- **Approximate indexes**: serialised FAISS indexes (kind `HnswIndex`), referenced by
+  the `IndexManifest`.
 - **Semantic indexes**: an `IndexManifest` record, its source `MemoryState` record,
   and a raw vector blob (kind `IndexVectors`, little-endian float32, row-major), all in
   the artifact store.
@@ -499,7 +597,7 @@ deferrals — is in [ROADMAP.md](ROADMAP.md).
 | 2 ✓ | Formation baselines, retrieval (lexical, recency), traces | A response is traceable to exact version digests |
 | 3 ✓ | Experiment runner: manifests, seeds, datasets, interventions, artifact store | Re-running a manifest reproduces its artifacts |
 | 4 ✓ | Evaluation: metrics, interval estimates, paired tests, failure taxonomy | Baseline vs. intervention comparison with CIs |
-| 5 ◐ | Semantic memory and local embedding infrastructure | Index rebuilds reproduce vectors; neighbours trace to versions; core runs without neural deps |
+| 5 ✓ | Semantic memory and local embedding infrastructure | Index rebuilds reproduce vectors; neighbours trace to versions; core runs without neural deps |
 | 6 | Hybrid retrieval and explainable ranking | Rank reproducible from trace; policies compared with paired statistics |
 | 7 | Memory consolidation and abstraction | Every consolidated memory has lineage to all supporting experiences |
 | 8 | Provenance and semantic memory graph | Graph is a pure, reproducible function of stored artifacts |
@@ -561,3 +659,12 @@ deferrals — is in [ROADMAP.md](ROADMAP.md).
 | 2026-09-27 | The first index is exact brute-force cosine. Rejected: FAISS/HNSW now. | An exact reference must exist before approximate indexes can be validated against it; laptop scale does not need ANN yet. |
 | 2026-09-27 | Manifest fields are added only with defaults omitted from canonical form (I33), implemented with the first new degree of freedom. Rejected: adding optional fields now. | Adding fields naively would change every existing manifest digest and break Phase 3/4 reproducibility. |
 | 2026-09-27 | No neural dependency added in this slice. | The contract, identity and index lifecycle are the prerequisite; a neural adapter without them would be unauditable. |
+| 2026-09-27 | Reference neural model: all-MiniLM-L6-v2 (384-d, ~22M parameters, Apache-2.0), pinned by revision and file hashes. Rejected: larger encoders (e5, bge-base; heavier on a laptop CPU with no need yet); API embedders (paid, remote, unpinnable). | Small, well-studied, CPU-feasible; the study needs a representative neural representation, not the strongest one. |
+| 2026-09-27 | Runtime: ONNX Runtime + HF tokenizers. Rejected: sentence-transformers/PyTorch (hundreds of MB of dependencies); a Hub client library (stdlib download of pinned files suffices). | Small optional footprint; single-threaded CPU inference is deterministic; validated against the PyTorch pipeline to 3.5e-7. |
+| 2026-09-27 | One text per batch. Rejected: batching. | Padding in a batch makes a text's numerics depend on its neighbours; determinism outweighs throughput here. |
+| 2026-09-27 | Neural reproducibility is "equivalent within a declared tolerance" (I37). Rejected: requiring byte identity across platforms; ignoring numerical drift. | Float32 inference legitimately differs across kernels; the tolerance is justified by measurement and recorded in the identity. |
+| 2026-09-27 | ANN backend: FAISS HNSW (wheels for 3.12 and 3.14). Rejected: hnswlib, usearch (viable, less established serialisation story here). ANN proposes candidates only (I38). | Approximation must never change a reported score; its loss is measured against the exact reference. |
+| 2026-09-27 | Manifest schema v2 via `ExtensibleRecord`; retriever and representation form one comparison variable, with a guard against unclassified manifest fields (I39). | Found while building v2: `compare` would otherwise have reported one changed variable when the embedding model also changed. |
+| 2026-09-27 | Semantic retrieval in runs gates on cosine > 0. Rejected: a tuned similarity threshold. | Zero is the natural boundary (orthogonality); thresholds are Phase 6 policy decisions, to be measured. |
+| 2026-09-27 | Exact search stays pure Python. Rejected: requiring numpy in the core. | It is the reference; its cost is measured (linear) and approximate search exists behind the optional extra. |
+| 2026-09-27 | ONNX Runtime telemetry is disabled with `ORT_DISABLE_TELEMETRY=1` before import, plus `disable_telemetry_events()`. | Found while validating Phase 5: about 1 in 4 test runs aborted at exit inside the runtime's 1DS HTTP telemetry client (crash backtrace). It was hidden network traffic, contrary to Principle 9. With the opt-out: 0 aborts in 20 runs (previously 5 in 20). The per-event API alone did not stop it. |

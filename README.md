@@ -22,54 +22,73 @@ questions (RQ1–RQ15), target architecture and staged roadmap to Phase 22 are i
 
 ## Status
 
-**Phases 1–4 complete; Phase 5 in progress (slice 1).** What exists today:
+**Phases 1–5 complete.** What exists today:
 
 - **Memory history** (`core`, `store`): content-addressed, immutable, bitemporal records;
   create / update / correct / forget; an append-only, verified SQLite log
 - **Formation and retrieval** (`formation`, `retrieval`): `episodic-v1` and
-  `statement-v1` policies with recorded decisions; BM25 and recency retrieval with
-  per-candidate evidence; an extractive responder that abstains without evidence
+  `statement-v1` policies with recorded decisions; lexical (BM25), recency and semantic
+  signals with per-candidate evidence; an extractive responder that abstains without
+  evidence
 - **Experiments** (`interventions`, `artifacts`, `experiments`, `scenarios`): seeded
   interventions, a write-once artifact store, a manifest runner with a `reproduce` check,
-  and datasets with epistemic ground truth
-- **Evaluation** (`comparison`, `taxonomy`, `statistics`, `evaluation`): exact answer
-  readings, a provenance-based failure taxonomy with a retrieval-versus-memory locus,
-  measurements that list their probes, Wilson intervals, and paired comparisons with
-  Newcombe intervals, exact McNemar tests, Holm adjustment and underpowered flags
-- **Semantic memory infrastructure** (`embeddings`, `semantic`): an embedding contract
-  with recorded model identity, a deterministic reference embedder, and a verifiable
-  semantic index artifact with exact search
+  datasets with epistemic ground truth; manifest schema v2 declares the vector
+  representation (embedder and index) as an experimental variable
+- **Evaluation** (`comparison`, `taxonomy`, `statistics`, `evaluation`): a
+  provenance-based failure taxonomy, measurements that list their probes, Wilson
+  intervals, paired Newcombe/McNemar comparisons with Holm adjustment
+- **Semantic memory** (`embeddings`, `neural`, `semantic`, `vectors`, `semantic_eval`):
+  a deterministic lexical-subword reference embedder; a local neural sentence embedder
+  (all-MiniLM-L6-v2 on ONNX Runtime, pinned by revision and file hashes) as an optional
+  extra; verifiable semantic indexes with exact search and optional FAISS HNSW candidate
+  generation; a controlled lexical-vs-neural study
+  ([results](docs/experiments/phase5-semantic.md))
 
-The reference embedder hashes character n-grams: it measures spelling similarity, not
-meaning, and exists so the infrastructure is testable without downloading a model. No
-neural embedder, semantic ranking signal, consolidation, memory graph, API or UI exists
-yet. This README describes only what is implemented.
+Neural embeddings are an experimental representation, not ground truth: in the Phase 5
+study they rate numeric changes and contradictions as similar to a query as true
+paraphrases. No hybrid ranking, consolidation, memory graph, API or UI exists yet. This
+README describes only what is implemented.
+
+The core needs no neural dependencies. For the neural representation and approximate
+search, install the extras and fetch the pinned model explicitly (nothing downloads
+implicitly):
+
+```bash
+uv sync --extra neural --extra ann
+```
 
 ```python
 from memoria.artifacts import ArtifactStore
 from memoria.embeddings import HashedNgramEmbedder
 from memoria.formation import EpisodicPolicy, form
-from memoria.scenarios import day, relocation_year
+from memoria.neural import (
+    MINILM,
+    NeuralSentenceEmbedder,
+    default_model_dir,
+    fetch_model,
+    minilm_spec,
+)
+from memoria.scenarios import semantic_diagnostic
 from memoria.semantic import SemanticIndex
 from memoria.store import MemoryLog
 
-store = ArtifactStore("var/artifacts")
-embedder = HashedNgramEmbedder(dimensions=256)  # identity: embedder.spec.digest
-
+fetch_model(MINILM, default_model_dir())  # once: pinned files, verified by SHA-256
+neural = NeuralSentenceEmbedder.open(minilm_spec(), default_model_dir())
+dataset, _ = semantic_diagnostic()
 with MemoryLog(":memory:") as log:
-    for step in relocation_year().steps:
+    for step in dataset.steps:
         form(log, step.experience, EpisodicPolicy(), recorded_at=step.recorded_at)
-    state = log.state_as_of(valid_at=day(345), known_at=day(345))
+    end = dataset.steps[-1].recorded_at
+    state = log.state_as_of(valid_at=end, known_at=end)
 
-index = SemanticIndex.build(state, embedder, store)  # state, vectors, manifest stored
-same = SemanticIndex.load(store, index.digest, embedder)  # other embedders are refused
-same.verify(store, embedder)  # re-embeds the stored state; bytes must match
-for hit in same.search("employer Initech", 3, embedder):
-    print(hit.rank, hit.similarity, hit.memory_id, hit.version)  # version -> provenance
+store = ArtifactStore("var/artifacts")
+for embedder in (HashedNgramEmbedder(), neural):  # control condition, then neural
+    index = SemanticIndex.build(state, embedder, store)  # vectors, state, manifest stored
+    for hit in index.search("What city is Ana's home?", 3, embedder):
+        print(embedder.spec.name, hit.rank, round(hit.similarity, 3), hit.version[:16])
 ```
 
-The Phase 4 evaluation workflow (run conditions, evaluate, compare with intervals) is
-shown in `memoria.scenarios.conditions` and `memoria.evaluation.compare`.
+The full study is one command: `python -m memoria.semantic_eval var/artifacts`.
 
 ## Research areas
 

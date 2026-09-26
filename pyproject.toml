@@ -8,6 +8,12 @@ license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = ["pydantic>=2.7"]
 
+[project.optional-dependencies]
+# Local neural embeddings (memoria.neural): ONNX Runtime on the CPU and HF tokenizers.
+neural = ["onnxruntime>=1.20", "tokenizers>=0.20", "numpy>=2"]
+# Approximate nearest-neighbour search (memoria.vectors): FAISS HNSW.
+ann = ["faiss-cpu>=1.9", "numpy>=2"]
+
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
 
@@ -27,6 +33,11 @@ strict = true
 plugins = ["pydantic.mypy"]
 files = ["src", "tests"]
 
+[[tool.mypy.overrides]]
+# Optional runtimes without type information (and absent from the core environment).
+module = ["onnxruntime", "onnxruntime.*", "tokenizers", "tokenizers.*", "faiss", "faiss.*", "numpy", "numpy.*"]
+ignore_missing_imports = true
+
 [tool.pydantic-mypy]
 init_forbid_extra = true
 init_typed = true
@@ -34,5 +45,9 @@ init_typed = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
+markers = [
+    "model: needs the pinned neural model files and the 'neural' extra (skipped otherwise)",
+    "ann: needs the 'ann' extra (skipped otherwise)",
+]
 xfail_strict = true
 filterwarnings = ["error"]

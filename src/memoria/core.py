@@ -11,9 +11,18 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated, Any, NamedTuple, Self
+from typing import Annotated, Any, ClassVar, Literal, NamedTuple, Self
 
-from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 
 class InvalidTransitionError(ValueError):
@@ -58,6 +67,26 @@ class Record(BaseModel):
     @property
     def digest(self) -> str:
         return content_hash(self.model_dump(mode="json"))
+
+
+class ExtensibleRecord(Record):
+    """A record whose schema can grow without changing existing digests (I33).
+
+    Fields named in ``_evolved`` are left out of every serialisation — hence of the
+    canonical form and the digest — while they hold their default. A field added this
+    way must default to the behaviour records had before it existed.
+    """
+
+    _evolved: ClassVar[frozenset[str]] = frozenset()
+
+    @model_serializer(mode="wrap")
+    def _omit_defaults(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        fields = type(self).model_fields
+        for name in self._evolved:
+            if getattr(self, name) == fields[name].default:
+                data.pop(name, None)
+        return data
 
 
 class Experience(Record):
@@ -620,7 +649,130 @@ class InterventionRecord(Record):
     added: tuple[Digest, ...]  # step digests, sorted; multiset difference output - input
 
 
-class RunManifest(Record):
+# --- representations: embedders and vector indexes --------------------------------------
+
+
+class Preprocessing(Record):
+    """Deterministic text preprocessing applied before embedding. Part of the identity."""
+
+    unicode: Literal["NFKC", "none"] = "NFKC"
+    casefold: bool = True
+    collapse_whitespace: bool = True
+    max_chars: int | None = Field(default=None, ge=1)  # truncate after normalisation
+
+
+Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
+class ModelFile(Record):
+    """One file a model's output depends on, pinned by content."""
+
+    path: str = Field(min_length=1)  # relative to the model directory
+    sha256: Sha256
+    size: int = Field(ge=0)
+
+
+class ModelIdentity(Record):
+    """Where a model comes from and exactly which bytes it is."""
+
+    provider: str = Field(min_length=1)  # e.g. "huggingface"
+    id: str = Field(min_length=1)  # e.g. "sentence-transformers/all-MiniLM-L6-v2"
+    revision: str = Field(min_length=1)  # an immutable revision (a commit hash)
+    files: tuple[ModelFile, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_invariants(self) -> Self:
+        paths = [f.path for f in self.files]
+        if paths != sorted(set(paths)):
+            raise ValueError("model files must be unique and sorted by path")
+        return self
+
+
+class Tolerance(Record):
+    """When two vectors from the same spec count as numerically equivalent.
+
+    Equivalent iff every component differs by at most ``max_abs`` and the cosine
+    between them is at least ``min_cosine``. Deterministic embedders declare no
+    tolerance: their outputs must be byte-identical.
+    """
+
+    max_abs: float = Field(gt=0, allow_inf_nan=False)
+    min_cosine: float = Field(gt=0, le=1, allow_inf_nan=False)
+
+
+class EmbedderSpec(ExtensibleRecord):
+    """Everything that determines an embedder's output. Its digest is the model identity.
+
+    Execution details that do not change the declared computation (hardware, thread
+    counts, library patch versions) are environment, not identity. A spec that names a
+    model must declare everything that shapes its output: pooling, truncation, maximum
+    tokens, runtime, batching, and the tolerance within which its outputs reproduce.
+    """
+
+    _evolved = frozenset(
+        {"model", "pooling", "max_tokens", "truncation", "runtime", "batch_size", "tolerance"}
+    )
+
+    name: str = Field(min_length=1)  # the adapter, e.g. "hashed-char-ngrams", "onnx-sentence"
+    version: str = Field(min_length=1)  # the adapter's version
+    dimensions: int = Field(ge=1)
+    preprocessing: Preprocessing = Preprocessing()
+    normalized: bool  # whether output vectors are L2-normalised (or zero)
+    params: Inputs = ()
+    model: ModelIdentity | None = None
+    pooling: Literal["mean", "cls"] | None = None
+    max_tokens: int | None = Field(default=None, ge=1)
+    truncation: Literal["right"] | None = None
+    runtime: str | None = None  # the inference runtime, e.g. "onnxruntime-cpu"
+    batch_size: int | None = Field(default=None, ge=1)
+    tolerance: Tolerance | None = None
+
+    @model_validator(mode="after")
+    def _check_invariants(self) -> Self:
+        neural = (
+            self.pooling,
+            self.max_tokens,
+            self.truncation,
+            self.runtime,
+            self.batch_size,
+            self.tolerance,
+        )
+        if self.model is not None and None in neural:
+            raise ValueError(
+                "a model spec must declare pooling, max_tokens, truncation, runtime, "
+                "batch_size and tolerance"
+            )
+        if self.model is None and any(x is not None for x in neural):
+            raise ValueError("model-inference settings require a model identity")
+        return self
+
+
+class IndexSpec(Record):
+    """How vectors are indexed. ``exact`` is the reference; approximate kinds are
+    validated against it."""
+
+    kind: Literal["exact", "hnsw"] = "exact"
+    metric: Literal["cosine"] = "cosine"
+    backend: str | None = None  # e.g. "faiss" for hnsw; None for the built-in exact index
+    params: Inputs = ()
+
+    @model_validator(mode="after")
+    def _check_invariants(self) -> Self:
+        if (self.kind == "exact") != (self.backend is None):
+            raise ValueError("the exact index is built in; approximate kinds name a backend")
+        if self.kind == "exact" and self.params:
+            raise ValueError("the exact index takes no parameters")
+        return self
+
+
+class RepresentationSpec(Record):
+    """A retrieval representation: which embedder produces vectors, how they are indexed."""
+
+    embedder: EmbedderSpec
+    index: IndexSpec = IndexSpec()
+
+
+class RunManifest(ExtensibleRecord):
     """Everything that determines a run. Its digest is the run ID.
 
     Components are named with explicit versions (``statement-v1``, ``bm25``...); those
@@ -628,12 +780,17 @@ class RunManifest(Record):
     contract. The execution environment is recorded separately and is not part of it.
     """
 
+    _evolved = frozenset({"representation"})
+
     name: str = Field(min_length=1)
     dataset: Digest
     interventions: tuple[InterventionSpec, ...] = ()
     policy: str = Field(min_length=1)
     retriever: RetrieverSpec
     responder: str = Field(min_length=1)
+    # Schema v2: the vector representation a semantic retriever uses. Absent (v1) means
+    # no vectors are involved; a retriever with a semantic signal requires it.
+    representation: RepresentationSpec | None = None
 
 
 class StepOutcome(Record):

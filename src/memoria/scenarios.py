@@ -29,6 +29,7 @@ from memoria.core import (
     unit_interval,
 )
 from memoria.retrieval import EXTRACTIVE, lexical_recency
+from memoria.semantic_eval import Judgement, Relevance, SemanticBenchmark, SemanticQuery
 
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -241,3 +242,137 @@ def conditions(dataset: str, policy: str, *, seed: int = 1) -> dict[str, RunMani
             spec("contaminate", rate=0.5, seed=seed, delay_days=1, source="contaminant"),
         ),
     }
+
+
+# --- Phase 5 semantic diagnostic -------------------------------------------------------------
+
+# (candidate id, text, relevance to its subject's queries or None if unjudged)
+_SEMANTIC_SUBJECTS: dict[str, tuple[tuple[str, str], list[tuple[str, str, str]]]] = {
+    "residence": (
+        ("Where does Ana live?", "What city is Ana's home?"),
+        [
+            ("res-base", "Ana lives in Berlin.", "paraphrase"),
+            ("res-para", "Ana's home is in Berlin.", "paraphrase"),
+            ("res-equiv", "Home for Ana is the capital of Germany.", "equivalent"),
+            ("res-source-same", "Ana lives in Berlin.", "other_source"),
+            ("res-source-text", "Ana's mother says Ana lives in Berlin.", "other_source"),
+            ("res-temporal", "Ana lived in Munich until 2024.", "temporal_variant"),
+            ("res-contra", "Ana lives in Hamburg.", "contradiction"),
+            ("res-neg", "Ana does not live in Berlin.", "negation"),
+            ("res-entity", "Ben lives in Berlin.", "entity_substitution"),
+            ("res-lexical", "Ana visits Berlin every summer.", "lexical_distractor"),
+            ("res-vocab", "Berlin has many lakes.", "shared_vocabulary"),
+        ],
+    ),
+    "meeting": (
+        ("When is the project meeting?", "What time do we sync about the project each week?"),
+        [
+            ("mtg-base", "The project meeting starts at 3 pm on Thursday.", "paraphrase"),
+            ("mtg-para", "Thursday's project meeting begins at 3 pm.", "paraphrase"),
+            (
+                "mtg-equiv",
+                "The weekly project sync is Thursday afternoon at fifteen hundred.",
+                "equivalent",
+            ),
+            ("mtg-number", "The project meeting starts at 5 pm on Thursday.", "numeric_change"),
+            (
+                "mtg-temporal",
+                "Last month the project meeting started at 10 am on Mondays.",
+                "temporal_variant",
+            ),
+            ("mtg-neg", "The project meeting does not start at 3 pm on Thursday.", "negation"),
+            ("mtg-lexical", "The project starts on Thursday.", "lexical_distractor"),
+            ("mtg-vocab", "Thursday is garbage collection day.", "shared_vocabulary"),
+        ],
+    ),
+    "medication": (
+        ("How much lisinopril does Leo take?", "What dose is Leo's blood pressure medication?"),
+        [
+            ("med-base", "Leo takes 20 mg of lisinopril each morning.", "paraphrase"),
+            ("med-para", "Every morning Leo has a 20 mg lisinopril dose.", "paraphrase"),
+            (
+                "med-equiv",
+                "Leo's blood-pressure pill is twenty milligrams, taken at breakfast.",
+                "equivalent",
+            ),
+            ("med-number", "Leo takes 40 mg of lisinopril each morning.", "numeric_change"),
+            ("med-contra", "Leo stopped taking lisinopril.", "contradiction"),
+            ("med-entity", "Mia takes 20 mg of lisinopril each morning.", "entity_substitution"),
+            ("med-vocab", "Lisinopril can cause a dry cough.", "shared_vocabulary"),
+        ],
+    ),
+    "employer": (
+        ("Where does Priya work?", "Who employs Priya?"),
+        [
+            ("job-base", "Priya works at Acme Corp as a data engineer.", "paraphrase"),
+            ("job-para", "Priya is a data engineer employed by Acme Corp.", "paraphrase"),
+            ("job-equiv", "Acme pays Priya to build its data pipelines.", "equivalent"),
+            ("job-temporal", "Priya worked at Globex before joining Acme.", "temporal_variant"),
+            ("job-contra", "Priya works at Initech as a data engineer.", "contradiction"),
+            ("job-entity", "Omar works at Acme Corp as a data engineer.", "entity_substitution"),
+            ("job-lexical", "Acme Corp hired a new data engineer.", "lexical_distractor"),
+        ],
+    ),
+    "pet": (
+        ("What is the name of Sam's dog?", "What did Sam call the puppy?"),
+        [
+            ("pet-base", "Sam's dog is called Biscuit.", "paraphrase"),
+            ("pet-para", "Sam has a dog named Biscuit.", "paraphrase"),
+            ("pet-equiv", "Biscuit is the puppy that belongs to Sam.", "equivalent"),
+            ("pet-neg", "Sam's dog is not called Biscuit.", "negation"),
+            ("pet-entity", "Sam's cat is called Biscuit.", "entity_substitution"),
+            ("pet-vocab", "Biscuit recipes need butter and flour.", "shared_vocabulary"),
+        ],
+    ),
+    "allergy": (
+        ("What is Noah allergic to?", "Which food gives Noah a reaction?"),
+        [
+            ("alg-base", "Noah is allergic to peanuts.", "paraphrase"),
+            ("alg-para", "Noah has a peanut allergy.", "paraphrase"),
+            ("alg-equiv", "Peanuts make Noah's throat swell up.", "equivalent"),
+            ("alg-neg", "Noah is not allergic to peanuts.", "negation"),
+            ("alg-contra", "Noah is allergic to shellfish, not peanuts.", "contradiction"),
+            ("alg-lexical", "Noah sells peanuts at the market.", "lexical_distractor"),
+        ],
+    ),
+    "flight": (
+        ("When does Kim fly to Tokyo?", "What date is Kim's trip to Japan?"),
+        [
+            ("flt-base", "Kim's flight to Tokyo departs on 14 March.", "paraphrase"),
+            ("flt-para", "Kim flies to Tokyo on 14 March.", "paraphrase"),
+            ("flt-number", "Kim's flight to Tokyo departs on 21 March.", "numeric_change"),
+            ("flt-temporal", "Kim flew to Tokyo last year in October.", "temporal_variant"),
+            ("flt-entity", "Kim's flight to Seoul departs on 14 March.", "entity_substitution"),
+            ("flt-vocab", "Tokyo is famous for cherry blossoms in March.", "shared_vocabulary"),
+        ],
+    ),
+}
+
+
+def semantic_diagnostic() -> tuple[Dataset, SemanticBenchmark]:
+    """The Phase 5 controlled diagnostic for representations (not the Phase 15 benchmark).
+
+    Each subject has a base fact and variants labelled by their relationship to the
+    subject's two queries — one phrased with the facts' own words, one without them.
+    Candidates are experiences (one per day, ingested as they occur); an experience's
+    ``source`` is its candidate id. Unjudged candidates (other subjects) are unrelated.
+    Labels are the design, stated before any measurement: which variants a
+    representation *should* place close to a query is what the experiment tests.
+    """
+    steps = []
+    queries = []
+    n = 0
+    for subject, (texts, candidates) in _SEMANTIC_SUBJECTS.items():
+        for cid, text, _ in candidates:
+            steps.append(_step(n, text, cid))
+            n += 1
+        judgements = tuple(
+            Judgement(candidate=cid, relevance=Relevance(r)) for cid, _, r in candidates
+        )
+        for i, text in enumerate(texts):
+            style = "worded" if i == 0 else "reworded"
+            queries.append(SemanticQuery(id=f"{subject}-{style}", text=text, judgements=judgements))
+    dataset = Dataset(name="semantic-diagnostic", version="1", steps=tuple(steps))
+    return dataset, SemanticBenchmark(
+        name="semantic-diagnostic", version="1", dataset=dataset.digest, queries=tuple(queries)
+    )

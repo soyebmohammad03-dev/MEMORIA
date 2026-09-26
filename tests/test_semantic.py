@@ -289,9 +289,9 @@ def test_incompatible_embedders_are_refused(store: ArtifactStore) -> None:
     other = HashedNgramEmbedder(seed=1)
     with pytest.raises(IndexCompatibilityError, match="built by"):
         SemanticIndex.load(store, ix.digest, other)
-    with pytest.raises(IndexCompatibilityError, match="query embedder"):
+    with pytest.raises(IndexCompatibilityError, match="built by"):
         ix.search("home", 1, other)
-    with pytest.raises(IndexCompatibilityError, match="verification"):
+    with pytest.raises(IndexCompatibilityError, match="built by"):
         ix.verify(store, other)
     with pytest.raises(IndexCompatibilityError):
         SemanticIndex.load(store, ix.digest, HashedNgramEmbedder(dimensions=128))

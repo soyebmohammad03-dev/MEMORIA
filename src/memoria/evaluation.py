@@ -66,7 +66,16 @@ from memoria.taxonomy import (
 
 COMPARATOR = "tokens-v1"
 CLASSIFIER = "provenance-v1"
-MANIFEST_VARIABLES = ("dataset", "interventions", "policy", "retriever", "responder")
+# The experimental variables of a manifest. The retriever and the representation it
+# embeds with form one variable, "retrieval": a representation has no effect except
+# through a retriever signal, and the runner requires them to be declared together.
+MANIFEST_VARIABLES: dict[str, tuple[str, ...]] = {
+    "dataset": ("dataset",),
+    "interventions": ("interventions",),
+    "policy": ("policy",),
+    "retrieval": ("retriever", "representation"),
+    "responder": ("responder",),
+}
 
 
 class EvaluationError(RuntimeError):
@@ -616,7 +625,14 @@ def compare(baseline: str, treatment: str, store: ArtifactStore) -> RunCompariso
         raise EvaluationError("evaluations use different specifications")
     mb = store.get_record(RunManifest, b.manifest)
     mt = store.get_record(RunManifest, t.manifest)
-    changed = [f for f in MANIFEST_VARIABLES if getattr(mb, f) != getattr(mt, f)]
+    changed = [
+        name
+        for name, fields in MANIFEST_VARIABLES.items()
+        if any(getattr(mb, f) != getattr(mt, f) for f in fields)
+    ]
+    covered = {f for fields in MANIFEST_VARIABLES.values() for f in fields} | {"name"}
+    if set(RunManifest.model_fields) - covered:  # a new manifest field must be classified
+        raise EvaluationError("manifest has fields the comparison does not account for")
     if len(changed) != 1:
         raise EvaluationError(
             "a controlled comparison changes exactly one manifest variable; "

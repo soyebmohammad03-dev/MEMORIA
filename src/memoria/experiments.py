@@ -18,18 +18,20 @@ import sqlite3
 import sys
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.metadata import version as package_version
 
 from memoria.artifacts import ArtifactStore
 from memoria.core import (
     Dataset,
     Digest,
+    EmbedderSpec,
     InterventionRecord,
     InterventionSpec,
     InvalidTransitionError,
     ProbeOutcome,
     Record,
+    RepresentationSpec,
     RetrieverSpec,
     RunManifest,
     RunOutcomes,
@@ -38,6 +40,7 @@ from memoria.core import (
     Step,
     StepOutcome,
 )
+from memoria.embeddings import Embedder, HashedNgramEmbedder
 from memoria.formation import EpisodicPolicy, FormationPolicy, StatementPolicy, form
 from memoria.interventions import Contaminate, Delay, Drop, Inject, Intervention, Reorder
 from memoria.retrieval import (
@@ -46,6 +49,7 @@ from memoria.retrieval import (
     Recency,
     Responder,
     Retriever,
+    SemanticSignal,
     Signal,
     answer,
     extractive,
@@ -58,6 +62,7 @@ class UnknownComponentError(LookupError):
 
 
 InterventionFactory = Callable[[Mapping[str, Scalar], ArtifactStore], Intervention]
+EmbedderFactory = Callable[[EmbedderSpec], Embedder]
 
 
 def _lookup[T](table: Mapping[str, T], name: str, kind: str) -> T:
@@ -80,6 +85,7 @@ class Registry:
     signals: Mapping[str, Callable[..., Signal]]
     responders: Mapping[str, Responder]
     interventions: Mapping[str, InterventionFactory]
+    embedders: Mapping[str, EmbedderFactory] = field(default_factory=dict)
 
     def extend(
         self,
@@ -88,6 +94,7 @@ class Registry:
         signals: Mapping[str, Callable[..., Signal]] | None = None,
         responders: Mapping[str, Responder] | None = None,
         interventions: Mapping[str, InterventionFactory] | None = None,
+        embedders: Mapping[str, EmbedderFactory] | None = None,
     ) -> Registry:
         """A new registry with more components. Existing names cannot be redefined."""
 
@@ -102,6 +109,7 @@ class Registry:
             signals=merged(self.signals, signals),
             responders=merged(self.responders, responders),
             interventions=merged(self.interventions, interventions),
+            embedders=merged(self.embedders, embedders),
         )
 
     def policy(self, name: str) -> FormationPolicy:
@@ -110,9 +118,29 @@ class Registry:
             raise ValueError(f"policy registered as {name!r} calls itself {policy.name!r}")
         return policy
 
-    def retriever(self, spec: RetrieverSpec) -> Retriever:
-        signals = []
+    def embedder(self, spec: EmbedderSpec) -> Embedder:
+        """Build the embedder a spec describes. There is no fallback: an unregistered or
+        unavailable embedder is an error, never a substitute."""
+        built = _lookup(self.embedders, spec.name, "embedder")(spec)
+        if built.spec != spec:
+            raise ValueError(f"embedder {spec.name!r} does not rebuild to its manifest spec")
+        return built
+
+    def retriever(
+        self, spec: RetrieverSpec, representation: RepresentationSpec | None = None
+    ) -> Retriever:
+        signals: list[tuple[Signal, float]] = []
         for s in spec.signals:
+            if s.name == SemanticSignal.name:
+                if representation is None:
+                    raise ValueError("a semantic signal needs a declared representation")
+                if representation.index.kind != "exact":
+                    raise ValueError(
+                        "retrieval scores every memory, so it uses the exact index; "
+                        "approximate candidate generation belongs to hybrid retrieval"
+                    )
+                signals.append((SemanticSignal(self.embedder(representation.embedder)), s.weight))
+                continue
             factory = _lookup(self.signals, s.name, "signal")
             try:
                 signals.append((factory(**dict(s.params)), s.weight))
@@ -151,6 +179,7 @@ DEFAULT_REGISTRY = Registry(
     policies={EpisodicPolicy.name: EpisodicPolicy, StatementPolicy.name: StatementPolicy},
     signals={BM25.name: BM25, Recency.name: Recency},
     responders={EXTRACTIVE: extractive},
+    embedders={HashedNgramEmbedder.NAME: HashedNgramEmbedder.from_spec},
     interventions={
         Drop.name: _from_params(Drop),
         Delay.name: _from_params(Delay),
@@ -184,7 +213,10 @@ def execute(
     in ``store`` (manifests reference it by digest).
     """
     policy = registry.policy(manifest.policy)
-    retriever = registry.retriever(manifest.retriever)
+    uses_vectors = any(s.name == SemanticSignal.name for s in manifest.retriever.signals)
+    if manifest.representation is not None and not uses_vectors:
+        raise ValueError("the manifest declares a representation that no signal uses")
+    retriever = registry.retriever(manifest.retriever, manifest.representation)
     responder = registry.responder(manifest.responder)
     dataset = store.get_record(Dataset, manifest.dataset)
     interventions = [registry.intervention(spec, store) for spec in manifest.interventions]

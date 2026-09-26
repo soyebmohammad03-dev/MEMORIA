@@ -41,9 +41,14 @@ Phases 5–22 build on it without weakening any invariant.
 - **Dependencies:** Phases 1–4.
 - **Deferred:** semantic signals inside ranking (Phase 6); representations beyond
   memory content — entities, relations (Phases 7–8).
-- **Status:** slice 1 complete (contract, reference embedder, exact index). Remaining:
-  neural adapter behind an optional extra with pinned revision and weights digest;
-  ANN backend with exactness checks; manifest schema v2 (see ARCHITECTURE.md §4.7).
+- **Status:** complete. Reference embedder and exact index; `onnx-sentence` adapter with
+  MiniLM-L6 pinned by revision and file hashes (optional `neural` extra); FAISS HNSW
+  candidate generation with exact re-scoring (optional `ann` extra); manifest schema v2
+  with `representation`; semantic signal in runs (exact index); the semantic diagnostic
+  and the lexical-vs-neural study with results in docs/experiments/phase5-semantic.md;
+  tolerance policy validated against the PyTorch reference. Open: cross-hardware
+  equivalence of neural outputs (needs model download in CI or a second platform);
+  numpy-accelerated exact search (not needed at current scale).
 
 ## Phase 6 — Hybrid retrieval and explainable ranking (L4)
 
@@ -62,6 +67,10 @@ Phases 5–22 build on it without weakening any invariant.
   paired comparisons between policies run through `compare`.
 - **Dependencies:** 5.
 - **Deferred:** learned or adaptive weights (13); source and confidence signals' semantics (12).
+- **Inputs from Phase 5:** semantic retrieval surfaces the right subject but not the right
+  value (numeric changes and contradictions score like paraphrases); the reference and
+  neural representations overlap in only 56% of top-5 results. Hybrid ranking should be
+  evaluated on exactly these failure modes, with ANN as candidate generation.
 
 ## Phase 7 — Memory consolidation and abstraction (L3, L1)
 

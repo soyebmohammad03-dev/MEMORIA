@@ -16,3 +16,18 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy
       - run: uv run pytest
+  # The optional extras (ONNX Runtime, tokenizers, FAISS). No model is downloaded:
+  # tests that need the pinned neural weights skip with a stated reason.
+  extras:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked --all-extras
+      - run: uv run mypy
+      - run: uv run pytest -rs

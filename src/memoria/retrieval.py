@@ -32,6 +32,7 @@ from memoria.core import (
     quantize,
     rank_key,
 )
+from memoria.embeddings import Embedder, Vector, cosine, embed, float32
 from memoria.store import MemoryLog
 
 _TOKEN = re.compile(r"\w+")
@@ -154,6 +155,43 @@ class Recency:
         return evidence
 
 
+class SemanticSignal:
+    """Exact cosine between the query and each memory's content, under one embedder.
+
+    Score = max(cosine, 0); the raw cosine is recorded as an input. As a gate, a memory
+    is eligible iff its cosine is positive (positively aligned with the query) — the
+    natural boundary, not a tuned threshold. Vectors are rounded to float32, as stored
+    in a :class:`~memoria.semantic.SemanticIndex`, so both report the same similarity.
+    Embeddings are memoised by text within one signal instance (a pure function).
+    """
+
+    name: ClassVar[str] = "semantic"
+
+    def __init__(self, embedder: Embedder) -> None:
+        self._embedder = embedder
+        self._memo: dict[str, Vector] = {}
+
+    @property
+    def params(self) -> tuple[tuple[str, Scalar], ...]:
+        return (("embedder", self._embedder.spec.digest),)
+
+    def _vectors(self, texts: Sequence[str]) -> list[Vector]:
+        missing = sorted({t for t in texts if t not in self._memo})
+        for t, v in zip(missing, embed(self._embedder, missing), strict=True):
+            self._memo[t] = float32(v)
+        return [self._memo[t] for t in texts]
+
+    def score(self, query: Query, memories: Sequence[MemoryVersion]) -> list[SignalEvidence]:
+        (q,) = self._vectors([query.text])
+        evidence = []
+        for v in self._vectors([m.content or "" for m in memories]):
+            c = quantize(cosine(q, v))
+            evidence.append(
+                SignalEvidence(signal=self.name, score=max(c, 0.0), inputs=(("cosine", c),))
+            )
+        return evidence
+
+
 @dataclass(frozen=True)
 class Retriever:
     """A named, fully specified ranking configuration."""
@@ -216,6 +254,11 @@ def lexical_recency(half_life_days: float = 30.0, recency_weight: float = 0.5) -
         ((BM25(), 1.0), (Recency(half_life_days), recency_weight)),
         gate=BM25.name,
     )
+
+
+def semantic(embedder: Embedder) -> Retriever:
+    """Semantic similarity only: the vector-representation counterpart of ``lexical``."""
+    return Retriever("semantic-v1", ((SemanticSignal(embedder), 1.0),), gate=SemanticSignal.name)
 
 
 EXTRACTIVE = "extractive-top1-v1"

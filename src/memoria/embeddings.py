@@ -20,27 +20,33 @@ import hashlib
 import math
 import re
 import unicodedata
+from array import array
 from collections.abc import Sequence
-from typing import Literal, Protocol
+from enum import StrEnum
+from typing import Protocol
 
-from pydantic import Field
+from memoria.core import EmbedderSpec, Preprocessing, Scalar, Tolerance
 
-from memoria.core import Inputs, Record, Scalar
+__all__ = [
+    "Agreement",
+    "Embedder",
+    "EmbedderSpec",
+    "EmbeddingError",
+    "HashedNgramEmbedder",
+    "Preprocessing",
+    "Vector",
+    "agreement",
+    "cosine",
+    "embed",
+    "float32",
+    "preprocess",
+]
 
 Vector = tuple[float, ...]
 
 
 class EmbeddingError(ValueError):
     """An embedder produced output that violates its contract."""
-
-
-class Preprocessing(Record):
-    """Deterministic text preprocessing applied before embedding. Part of the identity."""
-
-    unicode: Literal["NFKC", "none"] = "NFKC"
-    casefold: bool = True
-    collapse_whitespace: bool = True
-    max_chars: int | None = Field(default=None, ge=1)  # truncate after normalisation
 
 
 def preprocess(text: str, p: Preprocessing) -> str:
@@ -53,21 +59,6 @@ def preprocess(text: str, p: Preprocessing) -> str:
     if p.max_chars is not None:
         text = text[: p.max_chars]
     return text
-
-
-class EmbedderSpec(Record):
-    """Everything that determines an embedder's output. Its digest is the model identity.
-
-    For a neural model, ``params`` must pin the exact weights (e.g. repository revision
-    and weights digest) and any output-affecting setting (pooling, dtype).
-    """
-
-    name: str = Field(min_length=1)
-    version: str = Field(min_length=1)
-    dimensions: int = Field(ge=1)
-    preprocessing: Preprocessing = Preprocessing()
-    normalized: bool  # whether output vectors are L2-normalised (or zero)
-    params: Inputs = ()
 
 
 class Embedder(Protocol):
@@ -103,6 +94,20 @@ def embed(embedder: Embedder, texts: Sequence[str]) -> list[Vector]:
                 raise EmbeddingError(f"{spec.name}: vector {i} is not L2-normalised (norm {norm})")
         out.append(vector)
     return out
+
+
+def float32(vector: Sequence[float]) -> Vector:
+    """The vector as stored: each component rounded to IEEE float32."""
+    return tuple(array("f", vector))
+
+
+def cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    """Cosine similarity in [-1, 1]; 0 when either vector is zero."""
+    na = math.sqrt(math.fsum(x * x for x in a))
+    nb = math.sqrt(math.fsum(x * x for x in b))
+    if not na or not nb:
+        return 0.0
+    return max(-1.0, min(1.0, math.fsum(x * y for x, y in zip(a, b, strict=True)) / (na * nb)))
 
 
 class HashedNgramEmbedder:
@@ -143,6 +148,20 @@ class HashedNgramEmbedder:
             params=params,
         )
 
+    @classmethod
+    def from_spec(cls, spec: EmbedderSpec) -> HashedNgramEmbedder:
+        params = dict(spec.params)
+        built = cls(
+            dimensions=spec.dimensions,
+            n_min=int(params.get("n_min", 0)),
+            n_max=int(params.get("n_max", 0)),
+            seed=int(params.get("seed", 0)),
+            preprocessing=spec.preprocessing,
+        )
+        if built.spec != spec:
+            raise ValueError(f"{spec.name}: spec does not describe this embedder")
+        return built
+
     @property
     def spec(self) -> EmbedderSpec:
         return self._spec
@@ -161,3 +180,37 @@ class HashedNgramEmbedder:
                     counts[bucket] += 1 if h[8] & 1 else -1
         norm = math.sqrt(sum(c * c for c in counts))
         return [c / norm for c in counts] if norm else [0.0] * self._spec.dimensions
+
+
+class Agreement(StrEnum):
+    """How two sets of vectors from the same spec compare (ARCHITECTURE.md §4.8)."""
+
+    IDENTICAL = "identical"  # byte-for-byte the same float32 values
+    EQUIVALENT = "equivalent"  # within the spec's declared tolerance
+    DIFFERENT = "different"  # outside it (or any difference, with no tolerance declared)
+
+
+def agreement(
+    a: Sequence[Sequence[float]], b: Sequence[Sequence[float]], tolerance: Tolerance | None
+) -> Agreement:
+    """Classify two equally-shaped vector sets. Without a tolerance only identity passes."""
+    if len(a) != len(b) or any(len(x) != len(y) for x, y in zip(a, b, strict=True)):
+        return Agreement.DIFFERENT
+    if all(tuple(x) == tuple(y) for x, y in zip(a, b, strict=True)):
+        return Agreement.IDENTICAL
+    if tolerance is None:
+        return Agreement.DIFFERENT
+    for x, y in zip(a, b, strict=True):
+        if max((abs(p - q) for p, q in zip(x, y, strict=True)), default=0.0) > tolerance.max_abs:
+            return Agreement.DIFFERENT
+        nx = math.sqrt(math.fsum(p * p for p in x))
+        ny = math.sqrt(math.fsum(q * q for q in y))
+        if nx and ny:
+            if (
+                math.fsum(p * q for p, q in zip(x, y, strict=True)) / (nx * ny)
+                < tolerance.min_cosine
+            ):
+                return Agreement.DIFFERENT
+        elif nx or ny:
+            return Agreement.DIFFERENT
+    return Agreement.EQUIVALENT
