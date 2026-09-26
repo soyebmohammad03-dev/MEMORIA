@@ -3,6 +3,8 @@ name = "memoria"
 version = "0.0.0"
 description = "Long-Horizon Memory Intelligence & Reliability Observatory: an experimental platform for studying AI memory over time."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = ["pydantic>=2.7"]
 
