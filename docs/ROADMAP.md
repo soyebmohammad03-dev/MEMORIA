@@ -12,8 +12,8 @@ its validation criteria hold in CI.
 Phases 1–4 are complete and form the **substrate**: bitemporal append-only history
 (1), formation and retrieval with traces (2), reproducible experiments with
 interventions (3), and evaluation with a failure taxonomy and paired statistics (4).
-Phases 5–22 build on it without weakening any invariant. Phases 5 (semantic memory) and 6
-(hybrid, explainable retrieval) are complete.
+Phases 5–22 build on it without weakening any invariant. Phases 5 (semantic memory), 6
+(hybrid, explainable retrieval) and 7 (consolidation, abstraction, hierarchy) are complete.
 
 ---
 
@@ -85,9 +85,8 @@ Phases 5–22 build on it without weakening any invariant. Phases 5 (semantic me
   paired statistics from `memoria.statistics`. **Deviation:** the comparisons run inside
   the hybrid experiment on benchmark queries, not through `evaluation.compare`, because
   hybrid policies are not yet a run-manifest variable.
-- **Deferred:** a run-manifest field for retrieval policies, so `experiments.execute` and
-  `evaluation.compare` cover hybrid retrieval (with the first run that needs it, Phases
-  13/18); claims for free-text memories (Phases 7–8); corrections that are retroactive at
+- **Deferred:** a run-manifest field for retrieval policies (**done in Phase 7**: manifest
+  schema v3, `execute` and `compare` cover hybrid retrieval); claims for free-text memories (Phases 7–8); corrections that are retroactive at
   the memory level, not only the claim level (Phase 11); memory confidence as a signal
   (Phase 12); a larger generated benchmark (Phase 15); indexing every version for the
   semantic generator; learned or adaptive weights (Phase 13).
@@ -109,6 +108,22 @@ Phases 5–22 build on it without weakening any invariant. Phases 5 (semantic me
   experience; consolidation is replayable and reversible in analysis (history kept).
 - **Dependencies:** 5, and 6 for similarity-based merging.
 - **Deferred:** graph queries (8); summarisation by language models.
+- **Status:** complete. `DerivedMemory` (core) with levels L0–L4 and epistemic status;
+  `consolidation` (grouping regimes exact / canonical / claim / temporal / semantic,
+  complete-linkage with recorded guard refusals, occurrence-ordered timelines with
+  retroactive corrections and contested periods, L3 entity profiles, L4 timelines and
+  inferred co-changes, decomposed importance, recency and importance promotion, structured
+  loss reports, invalidation, deterministic replay); manifest schema v3 (retrieval and
+  consolidation policies by digest; hybrid and consolidated runs through `execute`,
+  `evaluate` and `compare`); level-aware hybrid retrieval (levels, `support` signal, stale
+  exclusion, exact scan generator); `consolidation_eval` (strategies A–H, ablations,
+  stability–plasticity sweeps, retrieval modes, demonstration) on eight generated worlds.
+  Results: docs/experiments/phase7-consolidation.md.
+- **Deferred after Phase 7:** access-frequency and feedback-driven importance (13);
+  claims for free-text memories and entity resolution beyond surface capitals (8);
+  language-model summaries as a consolidation regime, behind the same loss reports;
+  cross-hardware reproduction of neural semantic dedup (the lab uses the deterministic
+  reference embedder); incremental consolidation (each checkpoint rebuilds from history).
 
 ## Phase 8 — Provenance and semantic memory graph (L6)
 

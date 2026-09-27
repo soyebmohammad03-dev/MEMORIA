@@ -196,11 +196,11 @@ def test_neural_run_never_falls_back(store: ArtifactStore, tmp_path: Path) -> No
         v2().model_dump()
         | {
             "retriever": v2()
-            .retriever.model_copy(
+            .retriever.model_copy(  # type: ignore[union-attr]
                 update={
                     "signals": (
                         v2()
-                        .retriever.signals[0]
+                        .retriever.signals[0]  # type: ignore[union-attr]
                         .model_copy(update={"params": (("embedder", minilm_spec().digest),)}),
                     )
                 }
@@ -232,7 +232,10 @@ def test_representation_is_part_of_the_retrieval_variable(store: ArtifactStore) 
     drop = conditions(RELOCATION.digest, "statement-v1")["drop"]
     both = RunManifest.model_validate(
         drop.model_dump()
-        | {"retriever": v2().retriever.model_dump(), "representation": v2().representation}
+        | {
+            "retriever": v2().retriever.model_dump(),  # type: ignore[union-attr]
+            "representation": v2().representation,
+        }
     )
     with pytest.raises(EvaluationError, match="exactly one"):
         compare(lexical_run.digest, evaluate(execute(both, store).digest, store).digest, store)
@@ -248,10 +251,16 @@ def test_embedder_resolution_is_round_tripped() -> None:
 
 
 def test_run_records_are_unchanged_in_shape() -> None:
+    # Schema v3 adds only the evolved ``hierarchies``, omitted while empty, so a run
+    # without consolidation serialises exactly as before (golden run digests pin this).
     assert set(RunRecord.model_fields) == {
         "manifest",
         "dataset",
         "interventions",
         "log",
         "outcomes",
+        "hierarchies",
     }
+    d = "sha256:" + "0" * 64
+    record = RunRecord(manifest=d, dataset=d, interventions=(), log=d, outcomes=d)
+    assert "hierarchies" not in record.canonical()

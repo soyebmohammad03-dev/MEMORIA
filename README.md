@@ -22,7 +22,7 @@ questions (RQ1–RQ15), target architecture and staged roadmap to Phase 22 are i
 
 ## Status
 
-**Phases 1–6 complete.** What exists today:
+**Phases 1–7 complete.** What exists today:
 
 - **Memory history** (`core`, `store`): content-addressed, immutable, bitemporal records;
   create / update / correct / forget; an append-only, verified SQLite log
@@ -49,12 +49,21 @@ questions (RQ1–RQ15), target architecture and staged roadmap to Phase 22 are i
   exposure, all as content-addressed policies whose traces re-derive every score and
   explanation; ablations, leave-one-out, counterfactuals and adversarial cases with paired
   statistics ([results](docs/experiments/phase6-hybrid.md))
+- **Consolidation** (`consolidation`, `consolidation_eval`): derived, hierarchical memory
+  (L2 facts, L3 entity profiles, L4 timelines and inferred patterns) built as
+  content-addressed artifacts over immutable history, never as evidence; guarded
+  deduplication that reports unsafe merges; temporal consolidation; decomposed importance;
+  structured information-loss reports; consolidation and hybrid retrieval as run-manifest
+  variables (schema v3); a stability–plasticity laboratory
+  ([results](docs/experiments/phase7-consolidation.md))
 
 Neural embeddings are an experimental representation, not ground truth: in the Phase 5
 study they rate numeric changes and contradictions as similar to a query as true
 paraphrases. In the Phase 6 study, a superseded claim outranked the current one under
 policies that surface rather than penalise conflict. Retrieval relevance is a policy
-score, not truth. No consolidation, memory graph, API or UI exists yet. This README
+score, not truth. Consolidation's gains and losses are both measured: in the Phase 7 lab,
+temporal consolidation raised correct answers while exact deduplication merged identical
+statements from different periods. No memory graph, API or UI exists yet. This README
 describes only what is implemented.
 
 The core needs no neural dependencies. For the neural representation and approximate
@@ -98,7 +107,7 @@ for embedder in (HashedNgramEmbedder(), neural):  # control condition, then neur
 
 The Phase 5 study is one command: `python -m memoria.semantic_eval var/artifacts`; the
 Phase 6 study is `python -m memoria.hybrid_eval var/artifacts minilm` (or `hashed`, which
-needs no model).
+needs no model). The Phase 7 lab is `python -m memoria.consolidation_eval var/artifacts`.
 
 ## Research areas
 

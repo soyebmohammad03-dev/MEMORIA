@@ -211,6 +211,7 @@ def test_execution_environment_is_recorded_separately(store: ArtifactStore) -> N
         "interventions",
         "log",
         "outcomes",
+        "hierarchies",  # schema v3: consolidation artifacts, deterministic (not environment)
     }
 
 

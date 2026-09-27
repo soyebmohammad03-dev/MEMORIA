@@ -28,8 +28,10 @@ experience → encoding → memory formation → consolidation → memory repres
 
 Every arrow is a recorded, replayable transformation with provenance. Phases 1–4
 implement experience → formation → representation (bitemporal versions) → retrieval →
-response → evaluation; Phase 5 adds vector representations and indexing, and Phase 6
-decomposes retrieval into recorded stages (§4.10). The remaining arrows are the roadmap (§8).
+response → evaluation; Phase 5 adds vector representations and indexing, Phase 6
+decomposes retrieval into recorded stages (§4.10), and Phase 7 adds consolidation and
+abstraction as derived, hierarchical memory over immutable history (§4.12). The remaining
+arrows are the roadmap (§8).
 
 ### 1.2 Research questions
 
@@ -57,6 +59,10 @@ claims only when backed by stored runs and statistics (Principles 1, 3, 4).
 Phase 6 asks an operational question serving RQ7, RQ12 and RQ15: *when multiple memory
 signals disagree, which memories are retrieved, why are they ranked that way, and how
 sensitive is the ranking to each signal?* (§4.10, docs/experiments/phase6-hybrid.md).
+Phase 7 asks, serving RQ1, RQ8, RQ9 and RQ12: *how does memory consolidation strategy
+affect long-horizon retrieval quality, provenance fidelity, information loss,
+contradiction handling, computational cost and downstream memory reliability?* (§4.12,
+docs/experiments/phase7-consolidation.md).
 
 ## 2. Research Principles
 
@@ -135,6 +141,15 @@ These are enforced in code and tests, not by convention.
 | I45 | Relevance is a retrieval-policy score, not truth, confidence or memory quality. Temporal compatibility, recency, source priors and conflict status are separate recorded signals; contradictions are exposed, never resolved, in retrieval. |
 | I46 | Retrieval never falls back silently: a failing generator raises unless the policy declares that failures are recorded; a policy that needs an embedder or index it was not given is refused; approximate candidates are re-scored exactly (I36, I38). |
 | I47 | A hybrid experiment's identity is its spec (benchmark, representation, policies, ablation design, cut-offs, confidence, alpha). Traces are stored and re-verifiable; timings and memory are a separate `PerformanceRecord`. |
+| I48 | Derived memory is never evidence. A `DerivedMemory` is its own record type, never a `MemoryVersion` or `Experience`, never appended to the log, and never placed in a `MemoryState`; its epistemic status (derived, abstracted, inferred) is fixed by its operation and can never be observed. Only L1 versions are observed. |
+| I49 | Every derived memory cites the L1 versions it covers and their source experiences, and its parents; its lineage resolves downward to the log, and a hierarchy is rejected if any parent is not a lower level or is not covered. |
+| I50 | Consolidation is a pure function of (history known at the checkpoint, policy, embedder): replaying it reproduces the hierarchy byte for byte, and nothing in the log changes. |
+| I51 | A merge requires the grouping regime to match every member (complete linkage) and no enabled guard to object; a guard-blocked merge is recorded with the guard, never silently applied or dropped. Similarity alone never establishes equivalence. |
+| I52 | Consolidation preserves temporal structure: periods are ordered by occurrence, a change closes the earlier period without rewriting it, a correction replaces retroactively and is recorded as an exclusion, same-instant values stay separate and contested. |
+| I53 | An inferred pattern asserts no fact claim; an abstraction states only values its supporting memories state (checked as unsupported features). |
+| I54 | Every derived memory has a loss report: preserved, lost, altered, conflicting and unsupported features, and lineage coverage of experiences and sources. Its `lost` count must equal the report's. |
+| I55 | A consolidation or retrieval policy is a content-addressed record; a run manifest references it by digest (schema v3), and every manifest field belongs to exactly one comparison variable (I39 extended with "consolidation"). |
+| I56 | A derived memory whose evidence changed after it was built (retracted, or another value recorded inside its interval) is marked stale at query time; policies declare whether stale memories are excluded. |
 
 Tooling standard: Python ≥3.12, Pydantic v2, `mypy --strict`, Ruff, pytest with warnings
 as errors, `uv` with a committed lockfile, CI on every push.
@@ -175,6 +190,11 @@ as errors, `uv` with a committed lockfile, CI on every push.
 | **Signal** (hybrid) | A named, versioned feature with a declared direction and range; per candidate a raw value or a recorded reason it is missing (I42). | `hybrid.py` |
 | **Hybrid trace** | Generator runs, the candidate union with exclusions, every survivor's signals, contributions, penalties and placement, the selection and explanations; self-checking (I43). | `hybrid.py` |
 | **Hybrid experiment** | Policies × benchmark queries with metrics, diagnostics, ablations, leave-one-out, counterfactuals, adversarial cases and paired statistics. | `hybrid_eval.py` |
+| **Level / epistemic status** | L0 experiences, L1 formed memories, L2 consolidated facts, L3 concepts, L4 patterns; observed, derived, abstracted, inferred. | `core.py` |
+| **Derived memory** | A consolidated or abstracted memory with its lineage, interval, conflicts, support and loss count (I48–I49). | `core.py` |
+| **Consolidation policy / hierarchy** | What decides grouping, guards, promotion, abstraction and frequency; the content-addressed result of one consolidation, with merge decisions, loss reports and importance records. | `consolidation.py` |
+| **Loss report** | Structured feature accounting of a derived memory against its inputs (I54). | `consolidation.py` |
+| **Consolidation lab** | Strategy, ablation, stability–plasticity and retrieval-mode families as ordinary runs, evaluated and compared by Phase 4, plus consolidation metrics against ground-truth labels. | `consolidation_eval.py` |
 | **Autopsy** | The provenance DAG from a response back through retrieval → versions → operations → experiences, at a point in both time axes. | Phase 17 |
 
 The `update`/`correct` distinction is deliberate: it separates *temporal change* from
@@ -605,9 +625,8 @@ only the state at (`known_at`, `known_at`); other versions enter through the oth
 generators, and features stay exact for every candidate. Query-independent signals
 (provenance, source) add the same offset regardless of topic, which interacts with
 diversity. There is no tenant or session scope in MEMORIA, so there is no such filter.
-Hybrid policies are not yet run-manifest variables, so `evaluation.compare` does not
-cover them; policy comparisons use paired tests over benchmark queries inside the hybrid
-experiment.
+Since manifest schema v3 (Phase 7), hybrid policies are run-manifest variables, and
+`evaluation.compare` covers them (§4.12).
 
 ### 4.11 Hybrid retrieval methodology
 
@@ -624,6 +643,88 @@ paraphrase, reordering, irrelevant wording; information-changing: entity, attrib
 negation, number) and adversarial cases. `reproduce_hybrid` re-runs and compares byte for
 byte; `verify_experiment` re-reads and re-validates every trace. Results:
 docs/experiments/phase6-hybrid.md.
+
+### 4.12 Consolidation semantics (Phase 7)
+
+```mermaid
+flowchart TD
+    L0["L0 experiences (evidence, log)"] --> L1["L1 memory versions (observed, log)"]
+    L1 -->|"promotion filter: all / recent / important (decomposed importance)"| P[promoted]
+    L1 -->|"not promoted: archived, still retrievable at L1"| A[archive]
+    P -->|"grouping regime + guards (MergeDecision per version)"| L2["L2 facts (derived)"]
+    L2 -->|entity rule| L3["L3 entity profiles (abstracted)"]
+    L2 -->|timeline rule| L4a["L4 timelines (abstracted)"]
+    L2 -->|co-change rule| L4b["L4 co-changes (inferred, no claim)"]
+    L2 & L3 & L4a & L4b --> LR[loss report per derived memory]
+    L2 & L3 & L4a & L4b -->|"Corpus.with_derived + staleness"| R["hybrid retrieval (policy levels)"]
+    R --> E["evaluation / compare (Phase 4)"]
+    L3 -.lineage.-> L2 -.lineage.-> L1 -.derived_from.-> L0
+```
+
+**Hierarchy.** L0 experiences and L1 memory versions are the log (observed). Everything
+above is a `Hierarchy` artifact built at a checkpoint from the history known then: L2
+facts (a group of L1 versions judged equivalent: *promote* for a singleton, *merge*
+otherwise), L3 entity profiles (the values of an entity's attributes that hold at the
+checkpoint), L4 timelines (a key's periods in order, labelled stable, changing, recurring
+or contested) and L4 co-change patterns (keys of one entity that changed on the same day
+at least `min_support` times; *inferred*, never a fact). L0 is reached through provenance,
+not retrieved. Demotion is invalidation (a stale derived memory, excluded if the retrieval
+policy says so); archival is non-promotion (the evidence stays at L1).
+
+**Grouping regimes** (`ConsolidationPolicy.regime`): `none` (no derived memory),
+`exact` (identical text), `canonical` (identical tokens), `claim` (same structured key
+and value), `temporal` (same key and value within one period of the key's timeline),
+`semantic` (cosine ≥ `threshold` to every member). Grouping is complete-linkage over
+versions ordered by (start, memory_id, digest).
+
+**Guards** (surface heuristics, labelled as such): `claim_conflict` (the claims differ in
+key or value, or one retracts), `numeric` (different numbers), `negation`, `temporal`
+(different temporal markers: years, months, weekdays, tense words), `entity`
+(different capitalised tokens). Texts with identical canonical tokens violate none.
+
+**Temporal rules** (`timeline`): reports are ordered by occurrence, never ingestion; a
+new value closes the open period at its occurrence; a repeated value extends its period;
+a `correct` replaces the open period retroactively (from that period's start), and the
+replaced period is marked corrected (its evidence is excluded from temporal consolidation
+with reason `corrected`); another value at the same instant opens a parallel contested
+period; `forget` closes. A recurring value is a new period. Under the `temporal` regime an
+L2 fact's interval is its period; under other regimes it is the union of its members'
+intervals (episodic memories are open-ended), which the lab measures as abstraction error.
+
+**Importance** (`ImportanceSpec`): named components (recency, source prior, repetition,
+persistence, contradiction, provenance), each with raw value (or recorded reason it is
+missing), declared normalisation and weight (sum 1); the total decides promotion against
+a declared threshold. Access frequency, cross-query utility and explicit importance are
+not represented in MEMORIA before feedback events exist (Phase 13) and are not invented.
+
+**Information loss** (`LossReport`): input features are every input's structured claims
+(`key=value`), surface entities, numbers, temporal markers, negation and content words;
+output features are the derived memory's content and declared claims. Preserved and lost
+partition the input features; altered are input claims whose key the output restates with
+another value; conflicting are input claims that disagree among themselves (and whether the
+output keeps both); unsupported are output features no input states, excluding rendering
+vocabulary and the memory's own interval dates. Lineage coverage says what remains
+reachable by reference. Query-answer preservation is measured by runs, not by the report.
+Causal or relational structure is not represented in MEMORIA and is not measured.
+
+**Runs.** A manifest with a `consolidation_policy` consolidates at `start + i ×
+every_days` up to the last probe's `known_at`, storing each hierarchy (named in
+`RunRecord.hierarchies`); each probe retrieves from the corpus known at its `known_at`
+plus the latest hierarchy at or before it, with stale memories marked. Evaluation
+resolves cited derived memories through the hierarchies to their evidence.
+
+**Stability–plasticity design** (`consolidation_eval`): consolidation frequency, recency
+window (memory age), importance threshold, abstraction depth and evidence count
+(`min_support`), similarity threshold, guard ablation (contradiction threshold) and
+promotion policy are each varied against a no-consolidation baseline on the same probes.
+Results: docs/experiments/phase7-consolidation.md.
+
+Known limits: guards and feature extraction are surface heuristics, so a paraphrase with
+a different capitalised word is refused as an entity change, and a reworded negation
+outside the list is missed. Only statement-language reports carry claims, so free-text
+notes join claim-based groups only under the semantic regime. Rendered contents are
+templates; a query that asks about an attribute's history is answered from timeline
+renderings that the extractive responder cannot read as a single value.
 
 ## 5. Module Boundaries
 
@@ -651,6 +752,8 @@ vectors       FAISS HNSW candidate generation  (exists; extra 'ann')
 semantic_eval representation experiments, exact-vs-ANN, scaling  (exists)
 hybrid        corpus, generators, filters, signals, policies, explainable traces  (exists)
 hybrid_eval   hybrid benchmarks, ablations, counterfactuals, paired statistics  (exists)
+consolidation derived memory: grouping, guards, timelines, abstraction, importance, loss  (exists)
+consolidation_eval  consolidation lab: strategies, stability-plasticity, demonstration  (exists)
 provenance    autopsy / provenance graph (NetworkX)
 api           FastAPI surface over the above (no logic of its own)
 observatory   interactive visualisation (consumes api only)
@@ -667,7 +770,7 @@ sources, and every experiment reproduces from its manifest.
 |---|---|---|---|
 | L1 Memory core | Typed memories: episodic and semantic memories, temporal facts, entities, relations, sources, confidence, validity, lineage, consolidation state, supersession, contradiction and abstraction relationships — as explicit types, not a universal object | `core` versions and history | 1 ✓, extended 7, 8, 11, 12 |
 | L2 Formation | Pluggable policies (verbatim, keyed, abstraction, entity-centric, relation extraction, summarisation, hybrid); experience → decision → memory → evidence | `formation` | 2 ✓, extended 7 |
-| L3 Consolidation | candidate → validation → deduplication → merging → abstraction → durable memory, with lineage to every supporting experience | L1, L2, L5 | 7 |
+| L3 Consolidation | candidate → validation → deduplication → merging → abstraction → durable memory, with lineage to every supporting experience | L1, L2, L5 | 7 ✓ |
 | L4 Hybrid retrieval | Decomposed signals (lexical, semantic, temporal, recency, reliability, confidence, provenance, contradiction, diversity), rerankers, adaptive policies | `retrieval` signals and traces | 2 ✓, 6 ✓, 13 |
 | L5 Semantic memory | Local embedders and indexes as artifacts | `artifacts`, `core` states | 5 ✓ |
 | L6 Memory graph | Provenance and semantic graph with snapshots | all records | 8 |
@@ -767,7 +870,7 @@ deferrals — is in [ROADMAP.md](ROADMAP.md).
 | 4 ✓ | Evaluation: metrics, interval estimates, paired tests, failure taxonomy | Baseline vs. intervention comparison with CIs |
 | 5 ✓ | Semantic memory and local embedding infrastructure | Index rebuilds reproduce vectors; neighbours trace to versions; core runs without neural deps |
 | 6 ✓ | Hybrid retrieval and explainable ranking | Rank reproducible from trace; policies compared with paired statistics |
-| 7 | Memory consolidation and abstraction | Every consolidated memory has lineage to all supporting experiences |
+| 7 ✓ | Memory consolidation and abstraction | Every consolidated memory has lineage to all supporting experiences |
 | 8 | Provenance and semantic memory graph | Graph is a pure, reproducible function of stored artifacts |
 | 9 | Forgetting laboratory | Every forgotten memory reconstructible; retention measured with intervals |
 | 10 | Interference laboratory | Each generator parameter measurably moves its target property |
@@ -852,3 +955,14 @@ deferrals — is in [ROADMAP.md](ROADMAP.md).
 | 2026-09-27 | Leave one out against two references (`full` and diversity-free). | Found while running Phase 6: with diversity on, MMR dominated every other removal. |
 | 2026-09-27 | Benchmark targets are checked by recomputing the epistemic answer from the reports. | Found while validating Phase 6: two free-text restatements dated a day after a same-instant contradiction would have resolved it; they were re-dated before any reported run. |
 | 2026-09-27 | Hybrid policies are not yet a run-manifest variable. | Runs, manifests and `compare` are unchanged (I33). A manifest field for a retrieval policy belongs with the first run that needs one (Phases 13 and 18). |
+| 2026-09-27 | There is no separate CONSTITUTION.md: this document is the constitution. Rejected: creating a second file. | Two authoritative copies would drift; the Phase 7 brief named one, the repository has always had this one. |
+| 2026-09-27 | Derived memory is a separate record type (`DerivedMemory`) stored in hierarchy artifacts. Rejected: appending consolidated memories to the log as `MemoryVersion`s; making them `Experience`s. | A consolidated version in the log would be indistinguishable from formed evidence, and an experience would feed the claim reader: both violate I48. |
+| 2026-09-27 | Lineage records live in `core`. | The hybrid engine must hold derived memories and `core` is the only module everything may import (L1 layer: typed memories). |
+| 2026-09-27 | Hybrid and consolidation policies enter manifests by digest (schema v3); `retriever` becomes an evolved optional field, exactly one of it and `retrieval_policy` required. Rejected: embedding the policy records in the manifest. | `core` cannot import `hybrid`; referencing stored artifacts by digest is how manifests already reference datasets. Every v1/v2 digest is unchanged (verified by golden tests and by reproducing the published Phase 6 experiment digest). |
+| 2026-09-27 | Hybrid traces and responses of runs are stored as artifacts, not log records. | A hybrid trace covers derived memories the log does not hold; the log's record checks (I16) are for Phase 2 traces. Evaluation re-validates hybrid traces on load. |
+| 2026-09-27 | Grouping is complete-linkage with guards. Rejected: union-find over pairwise matches. | Transitivity would merge a and c through b even when a and c conflict. |
+| 2026-09-27 | Guards are deterministic surface heuristics. Rejected: an LLM or NLI judge. | Auditable and reproducible; they are labelled as heuristics, and their failures are measured (false merges, blocked merges). |
+| 2026-09-27 | A correction replaces its period retroactively; superseded (changed) values are kept as bounded historical periods. | Newer is not truer, but a correction says the earlier report was wrong (Phase 1 `correct`, Phase 4 relations). |
+| 2026-09-27 | Co-change patterns are inferred, carry no claim, and are scored against designed couplings. | The brief's "correlation becomes fact" failure is made measurable instead of possible. |
+| 2026-09-27 | Importance has no access-frequency component. | MEMORIA has no retrieval-feedback events before Phase 13; inventing them would be unfounded evidence. |
+| 2026-09-27 | Three existing tests were changed: the run-record field set (in two tests) now includes the evolved `hierarchies`, the hybrid signal registry includes `support`, and the v2 manifest tests carry typing-only `type: ignore`s for the now-optional `retriever`. | Each asserts a shape that grew additively; the digest guarantees they protect are tested unchanged (and the v2 shape test now also asserts `hierarchies` is omitted when empty). |

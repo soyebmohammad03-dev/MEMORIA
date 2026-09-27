@@ -17,7 +17,7 @@ Both are deterministic records stored as artifacts; the run's artifacts are only
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Self
 
@@ -25,8 +25,10 @@ from pydantic import Field, model_validator
 
 from memoria.artifacts import ArtifactStore
 from memoria.comparison import READERS, Agreement, Reading, agree, normalize, read
+from memoria.consolidation import Hierarchy
 from memoria.core import (
     Dataset,
+    DerivedMemory,
     Digest,
     Expectation,
     ExpectationStatus,
@@ -43,6 +45,7 @@ from memoria.core import (
     beliefs,
     quantize,
 )
+from memoria.hybrid import HybridTrace
 from memoria.statistics import (
     Proportion,
     holm,
@@ -73,7 +76,8 @@ MANIFEST_VARIABLES: dict[str, tuple[str, ...]] = {
     "dataset": ("dataset",),
     "interventions": ("interventions",),
     "policy": ("policy",),
-    "retrieval": ("retriever", "representation"),
+    "retrieval": ("retriever", "representation", "retrieval_policy"),
+    "consolidation": ("consolidation_policy",),
     "responder": ("responder",),
 }
 
@@ -230,12 +234,17 @@ def _evaluate_probe(
     authored_claims: dict[str, Claim],
     run_claims: dict[str, Claim],
     vocabulary: list[str],
-    trace: RetrievalTrace,
+    ranked: Sequence[str],
+    selected: Sequence[str],
+    trace: str,
     response: Response,
     log: MemoryLog,
-    versions: dict[str, MemoryVersion],
+    versions: Mapping[str, MemoryVersion | DerivedMemory],
     decisions: Sequence[FormationDecision],
+    eligible: int,
 ) -> ProbeEvaluation:
+    """Judge one probe. ``ranked`` is the retrieval's order over the memories it
+    considered (a Phase 2 trace: every state memory; a hybrid trace: every survivor)."""
     probe = effective.probes[probe_index[outcome_probe]]
     keys = subjects(probe, authored_claims)
     history = tuple(
@@ -258,13 +267,13 @@ def _evaluate_probe(
     wanted = {normalize(v) for v in probe.expected.values}
     rank = None
     held_values = set()
-    for i, candidate in enumerate(trace.candidates, 1):
-        for c in claims_of(candidate.version):
+    for i, candidate in enumerate(ranked, 1):
+        for c in claims_of(candidate):
             if c.key in keys and c.value:
                 held_values.add(normalize(c.value))
                 if rank is None and normalize(c.value) in wanted:
                     rank = i
-    expected_selected = rank is not None and trace.candidates[rank - 1].version in trace.selected
+    expected_selected = rank is not None and ranked[rank - 1] in selected
 
     reading = read(response.output, spec.readers, vocabulary)
     agreement = agree(reading, probe.expected)
@@ -298,7 +307,7 @@ def _evaluate_probe(
         valid_at=probe.valid_at,
         known_at=probe.known_at,
         expected=probe.expected,
-        trace=trace.digest,
+        trace=trace,
         response=response.digest,
         output=response.output,
         cited=response.cited,
@@ -307,9 +316,9 @@ def _evaluate_probe(
         agreement=agreement,
         classification=classification,
         retrieval=RetrievalEvidence(
-            candidates=len(trace.candidates),
-            eligible=sum(c.eligible for c in trace.candidates),
-            selected=len(trace.selected),
+            candidates=len(ranked),
+            eligible=eligible,
+            selected=len(selected),
             expected_rank=rank,
             expected_selected=expected_selected,
             subject_values=len(held_values),
@@ -459,25 +468,46 @@ def evaluate(run: str, store: ArtifactStore, spec: EvaluationSpec = DEFAULT_SPEC
     vocabulary = sorted({c.value for c in run_claims.values() if c.value})
     index = {p.id: i for i, p in enumerate(effective.probes)}
     evaluated = []
+    hybrid = manifest.retrieval_policy is not None
     with MemoryLog.load(store.get(record.log)) as log:
         log.verify()
         decisions = log.records(FormationDecision)
-        versions = {v.digest: v for v in log.versions()}
+        versions: dict[str, MemoryVersion | DerivedMemory] = {v.digest: v for v in log.versions()}
+        for h in record.hierarchies:
+            versions |= {m.digest: m for m in store.get_record(Hierarchy, h).memories}
         for o in outcomes.probes:
-            trace = log.record(RetrievalTrace, o.trace)
-            response = log.record(Response, o.response)
-            if trace is None or response is None:
-                raise EvaluationError(f"probe {o.probe}: trace or response missing from the log")
+            probe = effective.probes[index[o.probe]]
+            if hybrid:
+                hybrid_trace = store.get_record(HybridTrace, o.trace)
+                response = store.get_record(Response, o.response)
+                q = hybrid_trace.query
+                asked = (q.text, q.valid_at, q.known_at, q.limit, q.key)
+                if asked != (probe.text, probe.valid_at, probe.known_at, probe.limit, probe.key):
+                    raise EvaluationError(f"probe {o.probe}: trace answers a different query")
+                ranked = [r.version for r in hybrid_trace.ranking]
+                selected: Sequence[str] = hybrid_trace.selected
+                eligible = len(ranked)
+                trace_digest = hybrid_trace.digest
+            else:
+                trace = log.record(RetrievalTrace, o.trace)
+                logged = log.record(Response, o.response)
+                if trace is None or logged is None:
+                    raise EvaluationError(
+                        f"probe {o.probe}: trace or response missing from the log"
+                    )
+                response = logged
+                if trace.query != probe.query:
+                    raise EvaluationError(f"probe {o.probe}: trace answers a different query")
+                ranked = [c.version for c in trace.candidates]
+                selected = trace.selected
+                eligible = sum(c.eligible for c in trace.candidates)
+                trace_digest = trace.digest
             if (response.trace, response.output, response.cited) != (
-                trace.digest,
+                trace_digest,
                 o.output,
                 o.cited,
             ):
-                raise EvaluationError(
-                    f"probe {o.probe}: outcome disagrees with the logged response"
-                )
-            if trace.query != effective.probes[index[o.probe]].query:
-                raise EvaluationError(f"probe {o.probe}: trace answers a different query")
+                raise EvaluationError(f"probe {o.probe}: outcome disagrees with the response")
             evaluated.append(
                 _evaluate_probe(
                     spec,
@@ -487,11 +517,14 @@ def evaluate(run: str, store: ArtifactStore, spec: EvaluationSpec = DEFAULT_SPEC
                     authored_claims,
                     run_claims,
                     vocabulary,
-                    trace,
+                    ranked,
+                    selected,
+                    trace_digest,
                     response,
                     log,
                     versions,
                     decisions,
+                    eligible,
                 )
             )
     evaluation = Evaluation(

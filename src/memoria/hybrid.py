@@ -39,15 +39,21 @@ from typing import Any, Literal, Self
 
 from pydantic import Field, model_validator
 
+from memoria.comparison import normalize as normalize_value
 from memoria.core import (
+    DerivedMemory,
     Digest,
+    EpistemicStatus,
     Experience,
+    ExtensibleRecord,
     Inputs,
+    Level,
     MemoryState,
     MemoryVersion,
     Operation,
     Query,
     Record,
+    Response,
     Scalar,
     SignalEvidence,
     UTCDatetime,
@@ -57,7 +63,7 @@ from memoria.core import (
 )
 from memoria.embeddings import Embedder, Vector, cosine, embed, float32
 from memoria.formation import parse_statement
-from memoria.retrieval import BM25, tokenize
+from memoria.retrieval import BM25, EXTRACTIVE, tokenize
 from memoria.semantic import IndexCompatibilityError, SemanticIndex
 from memoria.store import MemoryLog
 from memoria.taxonomy import Claim, Relation, relate
@@ -125,6 +131,7 @@ class Exclusion(StrEnum):
     FUTURE = "future"
     SUPERSEDED = "superseded"
     FORGOTTEN = "forgotten"
+    STALE = "stale"  # a derived memory whose supporting evidence changed after it was built
 
 
 MemoryKind = Literal["fact", "note"]  # carries one structured claim / free text
@@ -132,15 +139,23 @@ MemoryKind = Literal["fact", "note"]  # carries one structured claim / free text
 
 @dataclass(frozen=True)
 class Entry:
-    """One content-bearing memory version, with everything filters and signals read."""
+    """One retrievable memory, with everything filters and signals read.
 
-    version: MemoryVersion
+    A log version is L1 and observed; a consolidated memory carries its own level and
+    epistemic status (never observed), and ``stale`` when evidence it rests on changed
+    after it was built.
+    """
+
+    version: MemoryVersion | DerivedMemory
     fate: Literal["held", "superseded", "forgotten"]
     interval: tuple[datetime, datetime | None] | None  # effective validity, if held
     claim: Claim | None
     claim_issue: Literal["unstructured", "ambiguous"] | None
     sources: tuple[Experience, ...]  # resolved cited experiences, by digest
     missing: int  # cited experiences absent from the corpus
+    level: Level = Level.L1
+    status: EpistemicStatus = EpistemicStatus.OBSERVED
+    stale: bool = False
 
     @property
     def digest(self) -> str:
@@ -191,12 +206,16 @@ def _claim_of(
     return next(iter(found.values())), None
 
 
-class CorpusIdentity(Record):
+class CorpusIdentity(ExtensibleRecord):
     """What a corpus contains. Its digest identifies the retrieval universe."""
+
+    _evolved = frozenset({"derived", "stale"})
 
     known_at: UTCDatetime
     versions: tuple[Digest, ...]  # every version recorded by known_at, sorted
     experiences: tuple[Digest, ...]  # cited experiences that are available, sorted
+    derived: tuple[Digest, ...] = ()  # consolidated memories added, sorted
+    stale: tuple[Digest, ...] = ()  # those among them that are invalidated, sorted
 
 
 @dataclass(frozen=True)
@@ -214,6 +233,7 @@ class Corpus:
     claims: tuple[Claim, ...]  # every claim cited by a known version, including tombstones
     present: MemoryState  # state at (known_at, known_at): what a semantic index covers
     identity: CorpusIdentity
+    experiences: Mapping[str, Experience] = field(default_factory=dict, repr=False)
 
     @property
     def digest(self) -> str:
@@ -274,6 +294,62 @@ class Corpus:
                     sorted({d for v in known for d in v.derived_from if d in by_digest})
                 ),
             ),
+            experiences=by_digest,
+        )
+
+    def with_derived(self, memories: Sequence[DerivedMemory], stale: Iterable[str]) -> Corpus:
+        """This corpus plus consolidated memories, each marked with its level and status.
+
+        A derived memory's claim is read from its own evidence: the latest-occurring
+        evidence claim asserting its key and value (never from its rendered content).
+        """
+        stale = set(stale)
+        added = []
+        for m in memories:
+            if m.recorded_at > self.known_at:
+                raise ValueError(f"{m.memory_id} was consolidated after known_at")
+            cited = [self.experiences[d] for d in m.derived_from if d in self.experiences]
+            claim = None
+            if m.key is not None:
+                matching = [
+                    c
+                    for c in self.claims
+                    if c.experience in m.derived_from
+                    and c.key == m.key
+                    and c.value is not None
+                    and normalize_value(c.value) == normalize_value(m.value or "")
+                ]
+                claim = max(matching, key=lambda c: (c.occurred_at, c.experience), default=None)
+            added.append(
+                Entry(
+                    version=m,
+                    fate="held",
+                    interval=(m.valid_from, m.valid_to),
+                    claim=claim,
+                    claim_issue=None if claim is not None else "unstructured",
+                    sources=tuple(sorted(cited, key=lambda e: e.digest)),
+                    missing=len(m.derived_from) - len(cited),
+                    level=m.level,
+                    status=m.status,
+                    stale=m.memory_id in stale,
+                )
+            )
+        entries = sorted(
+            (*self.entries, *added),
+            key=lambda e: (e.version.memory_id, e.version.version, e.digest),
+        )
+        return Corpus(
+            known_at=self.known_at,
+            entries=tuple(entries),
+            claims=self.claims,
+            present=self.present,
+            identity=self.identity.model_copy(
+                update={
+                    "derived": tuple(sorted(m.digest for m in memories)),
+                    "stale": tuple(sorted(m.digest for m in memories if m.memory_id in stale)),
+                }
+            ),
+            experiences=self.experiences,
         )
 
 
@@ -402,6 +478,7 @@ class Context:
     engine: Engine
     query: HybridQuery
     params: Mapping[str, Scalar]
+    levels: tuple[Level, ...] = (Level.L1,)
 
 
 def _need(params: Mapping[str, Scalar], allowed: Iterable[str], required: bool = True) -> None:
@@ -448,7 +525,8 @@ def _no_params(params: Mapping[str, Scalar]) -> None:
 
 
 def _lexical(ctx: Context, e: Entry) -> Extracted:
-    ev = ctx.engine.bm25(ctx.query, float(ctx.params["k1"]), float(ctx.params["b"]))[e.digest]
+    k1, b = float(ctx.params["k1"]), float(ctx.params["b"])
+    ev = ctx.engine.bm25(ctx.query, k1, b, ctx.levels)[e.digest]
     return ev.score, None, ev.inputs
 
 
@@ -543,6 +621,14 @@ def _attribute(ctx: Context, e: Entry) -> Extracted:
     return (1.0 if e.claim.key == q else 0.0), None, inputs
 
 
+def _support(ctx: Context, e: Entry) -> Extracted:
+    inputs: tuple[tuple[str, Scalar], ...] = (
+        ("level", e.level.value),
+        ("status", e.status.value),
+    )
+    return float(len(e.version.derived_from)), None, inputs
+
+
 def _contradiction(ctx: Context, e: Entry) -> Extracted:
     status = ctx.engine.conflict(e, ctx.query.valid_at)
     if status is None:
@@ -597,6 +683,10 @@ SIGNALS: dict[str, SignalDef] = {
         SignalDef(
             "attribute", "1", 1, (0.0, 1.0), _no_params, _attribute,
             "1 if the memory's claim key equals the query key; an entity-only match is 0.",
+        ),
+        SignalDef(
+            "support", "1", 1, None, _no_params, _support,
+            "Number of source experiences the memory covers (1 for an L1 episode).",
         ),
         SignalDef(
             "contradiction", "1", -1, (0.0, 1.0), _no_params, _contradiction,
@@ -713,13 +803,17 @@ class DiversitySpec(Record):
 Exposure = Literal["neutral", "penalize", "surface", "paired"]
 
 
-class RetrievalPolicy(Record):
+class RetrievalPolicy(ExtensibleRecord):
     """A complete, versioned retrieval policy. Its digest is the policy identity.
 
     Generators and signals are listed in name order, so one behaviour has one identity.
     Weights are positive and sum to 1. ``exclude`` lists the hard filters; malformed
-    provenance is always excluded (no provenance-free memory, I4).
+    provenance is always excluded (no provenance-free memory, I4). ``levels`` (schema
+    evolution; default L1, the only level before consolidation) are the memory levels the
+    policy may retrieve.
     """
+
+    _evolved = frozenset({"levels"})
 
     name: str = Field(min_length=1)
     version: str = Field(min_length=1)
@@ -734,15 +828,22 @@ class RetrievalPolicy(Record):
     tie_break: Literal["final>relevance>memory_id>version>digest"] = (
         "final>relevance>memory_id>version>digest"
     )
+    levels: tuple[Level, ...] = (Level.L1,)
 
     @model_validator(mode="after")
     def _check_invariants(self) -> Self:
+        if not self.levels or list(self.levels) != sorted(set(self.levels)):
+            raise ValueError("levels must be non-empty, unique and sorted")
+        if Level.L0 in self.levels:
+            raise ValueError("L0 experiences are reached through provenance, not retrieved")
         gens = [g.name for g in self.generators]
         if gens != sorted(set(gens)):
             raise ValueError("generators must be unique and sorted by name")
         for g in self.generators:
             allowed = {"lexical": ("b", "k1"), "semantic": ("index",), "metadata": ()}[g.name]
             _need(dict(g.params), allowed)
+            if g.name == "semantic" and dict(g.params)["index"] not in ("exact", "hnsw", "scan"):
+                raise ValueError("semantic index must be 'exact', 'hnsw' or 'scan'")
         if list(self.exclude) != sorted(set(self.exclude)):
             raise ValueError("exclusions must be unique and sorted")
         if Exclusion.MALFORMED_PROVENANCE not in self.exclude:
@@ -814,8 +915,14 @@ class GeneratorHit(Record):
     score: float = Field(allow_inf_nan=False)
 
 
-class CandidateRecord(Record):
-    """A member of the candidate union: who proposed it, its metadata, and its exclusion."""
+class CandidateRecord(ExtensibleRecord):
+    """A member of the candidate union: who proposed it, its metadata, and its exclusion.
+
+    ``level``, ``status`` and ``stale`` (schema evolution; defaults: an observed L1
+    version) say what kind of memory it is, so a derived memory is never mistaken for one.
+    """
+
+    _evolved = frozenset({"level", "status", "stale"})
 
     version: Digest
     memory_id: str
@@ -825,6 +932,9 @@ class CandidateRecord(Record):
     conflict: ConflictStatus | None  # None: the memory carries no structured claim
     conflicts_with: tuple[Digest, ...]  # corpus versions with another value for its key
     excluded: Exclusion | None = None
+    level: Level = Level.L1
+    status: EpistemicStatus = EpistemicStatus.OBSERVED
+    stale: bool = False
 
 
 class Contribution(Record):
@@ -1050,9 +1160,15 @@ class HybridTrace(Record):
             raise ValueError("candidates are not in canonical (memory_id, version) order")
         by_version = {c.version: c for c in self.candidates}
         for c in self.candidates:
+            if c.level not in p.levels:
+                raise ValueError(f"candidate {c.memory_id}: level {c.level} not retrievable")
+            if (c.level is Level.L1) != (c.status is EpistemicStatus.OBSERVED):
+                raise ValueError(f"candidate {c.memory_id}: only L1 memories are observed")
             expected: Exclusion | None = None
             if c.excluded is Exclusion.MALFORMED_PROVENANCE:
                 expected = c.excluded
+            elif c.stale and Exclusion.STALE in p.exclude:
+                expected = Exclusion.STALE
             elif c.temporal.value in {x.value for x in p.exclude}:
                 expected = Exclusion(c.temporal.value)
             if c.excluded is not expected:
@@ -1153,12 +1269,14 @@ class Engine:
     corpus: Corpus
     embedder: Embedder | None = None
     index: SemanticIndex | None = None
-    _vectors: dict[str, Vector] = field(default_factory=dict, repr=False)
-    _bm25: dict[tuple[str, float, float], dict[str, SignalEvidence]] = field(
+    # Memos of pure functions of (text, embedder); callers may share them between engines
+    # that use the same embedder (e.g. every probe of one run).
+    vectors: dict[str, Vector] = field(default_factory=dict, repr=False)
+    similarities: dict[tuple[str, str], float] = field(default_factory=dict, repr=False)
+    _bm25: dict[tuple[str, float, float, tuple[Level, ...]], dict[str, SignalEvidence]] = field(
         default_factory=dict, repr=False
     )
     _conflicts: dict[str, tuple[str, ...]] = field(default_factory=dict, repr=False)
-    _similarities: dict[tuple[str, str], float] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         if self.index is not None:
@@ -1169,28 +1287,35 @@ class Engine:
         self._by_digest = {e.digest: e for e in self.corpus.entries}
 
     # Shared, memoised feature sources.
-    def bm25(self, query: HybridQuery, k1: float, b: float) -> dict[str, SignalEvidence]:
-        key = (query.text, k1, b)
+    def universe(self, levels: tuple[Level, ...]) -> list[Entry]:
+        """The entries a policy may retrieve: those at its levels."""
+        return [e for e in self.corpus.entries if e.level in levels]
+
+    def bm25(
+        self, query: HybridQuery, k1: float, b: float, levels: tuple[Level, ...] = (Level.L1,)
+    ) -> dict[str, SignalEvidence]:
+        """BM25 with corpus statistics over the policy's universe (its levels)."""
+        key = (query.text, k1, b, levels)
         if key not in self._bm25:
-            scores = BM25(k1, b).score(query.core, [e.version for e in self.corpus.entries])
-            self._bm25[key] = {
-                e.digest: s for e, s in zip(self.corpus.entries, scores, strict=True)
-            }
+            entries = self.universe(levels)
+            # BM25 reads only ``content``, which derived memories carry too.
+            scores = BM25(k1, b).score(query.core, [e.version for e in entries])  # type: ignore[misc]
+            self._bm25[key] = {e.digest: s for e, s in zip(entries, scores, strict=True)}
         return self._bm25[key]
 
     def vector(self, text: str) -> Vector:
         if self.embedder is None:
             raise PolicyError("this policy needs an embedder and none was given")
-        if text not in self._vectors:
+        if text not in self.vectors:
             (v,) = embed(self.embedder, [text])
-            self._vectors[text] = float32(v)
-        return self._vectors[text]
+            self.vectors[text] = float32(v)
+        return self.vectors[text]
 
     def similarity(self, a: str, b: str) -> float:
         key = (a, b) if a <= b else (b, a)  # cosine is symmetric
-        if key not in self._similarities:
-            self._similarities[key] = quantize(cosine(self.vector(a), self.vector(b)))
-        return self._similarities[key]
+        if key not in self.similarities:
+            self.similarities[key] = quantize(cosine(self.vector(a), self.vector(b)))
+        return self.similarities[key]
 
     def conflict(self, e: Entry, valid_at: datetime) -> ConflictStatus | None:
         return conflict(e, self.corpus.claims, valid_at)
@@ -1201,7 +1326,9 @@ class Engine:
         return self._conflicts[e.digest]
 
     # Stages.
-    def _generate(self, spec: GeneratorSpec, query: HybridQuery) -> GeneratorRun:
+    def _generate(
+        self, spec: GeneratorSpec, query: HybridQuery, levels: tuple[Level, ...] = (Level.L1,)
+    ) -> GeneratorRun:
         params = dict(spec.params)
 
         def run(
@@ -1223,10 +1350,10 @@ class Engine:
                 proposals=proposals,
             )
 
-        entries = self.corpus.entries
+        entries = self.universe(levels)
         rows: list[tuple[float, Entry]]
         if spec.name == "lexical":
-            scores = self.bm25(query, float(params["k1"]), float(params["b"]))
+            scores = self.bm25(query, float(params["k1"]), float(params["b"]), levels)
             rows = [(scores[e.digest].score, e) for e in entries if scores[e.digest].score > 0]
             considered = len(entries)
         elif spec.name == "metadata":
@@ -1236,7 +1363,16 @@ class Engine:
             considered = len(entries)
         else:
             try:
-                rows, considered = self._semantic_rows(query, spec.limit, str(params["index"]))
+                if params["index"] == "scan":
+                    # Exact cosine over the policy's universe, no index artifact: the only
+                    # way to reach derived memories, which no MemoryState holds.
+                    text = query.text
+                    rows = [(self.similarity(text, e.version.content or ""), e) for e in entries]
+                    considered = len(entries)
+                else:
+                    rows, considered = self._semantic_rows(
+                        query, spec.limit, str(params["index"]), levels
+                    )
             except (GeneratorError, IndexCompatibilityError, PolicyError) as e:
                 return run("failed", error=str(e))
         rows.sort(key=lambda r: (-r[0], r[1].version.memory_id, r[1].version.version, r[1].digest))
@@ -1251,7 +1387,7 @@ class Engine:
         )
 
     def _semantic_rows(
-        self, query: HybridQuery, limit: int, kind: str
+        self, query: HybridQuery, limit: int, kind: str, levels: tuple[Level, ...] = (Level.L1,)
     ) -> tuple[list[tuple[float, Entry]], int]:
         if self.index is None or self.embedder is None:
             raise GeneratorError("no semantic index was given")
@@ -1261,7 +1397,8 @@ class Engine:
             )
         self.index.require_source(self.corpus.present)
         hits = self.index.search(query.text, limit, self.embedder)
-        return [(h.similarity, self._by_digest[h.version]) for h in hits], len(
+        kept_hits = [h for h in hits if self._by_digest[h.version].level in levels]
+        return [(h.similarity, self._by_digest[h.version]) for h in kept_hits], len(
             self.index.manifest.entries
         )
 
@@ -1283,7 +1420,7 @@ class Engine:
         clock = _Clock(timings)
 
         with clock("generate"):
-            runs = tuple(self._generate(g, query) for g in policy.generators)
+            runs = tuple(self._generate(g, query, policy.levels) for g in policy.generators)
         failed = [r for r in runs if r.status == "failed"]
         if failed and policy.on_generator_failure == "fail":
             raise GeneratorError("; ".join(f"{r.generator}: {r.error}" for r in failed))
@@ -1306,6 +1443,8 @@ class Engine:
                 reason = None
                 if e.missing:
                     reason = Exclusion.MALFORMED_PROVENANCE
+                elif e.stale and Exclusion.STALE in policy.exclude:
+                    reason = Exclusion.STALE
                 elif status.value in excluded_statuses:
                     reason = Exclusion(status.value)
                 candidates.append(
@@ -1318,6 +1457,9 @@ class Engine:
                         conflict=self.conflict(e, query.valid_at),
                         conflicts_with=self.conflicting(e),
                         excluded=reason,
+                        level=e.level,
+                        status=e.status,
+                        stale=e.stale,
                     )
                 )
             survivors = [e for e, c in zip(union, candidates, strict=True) if c.excluded is None]
@@ -1328,7 +1470,8 @@ class Engine:
                 row = []
                 for cfg in policy.signals:
                     d = SIGNALS[cfg.name]
-                    value, why, inputs = d.extract(Context(self, query, dict(cfg.params)), e)
+                    ctx = Context(self, query, dict(cfg.params), policy.levels)
+                    value, why, inputs = d.extract(ctx, e)
                     if value is not None:
                         _finite(value, f"signal {cfg.name}")
                     elif cfg.on_missing == "fail":
@@ -1567,3 +1710,17 @@ def policy(
 
 
 RRF_K = 60  # the constant used by Cormack, Clarke & Buettcher (2009)
+
+
+def extractive(trace: HybridTrace, corpus: Corpus) -> Response:
+    """The Phase 2 extractive responder over a hybrid trace: the top selected memory's
+    content verbatim (observed or derived), citing it; abstain if nothing is selected."""
+    if not trace.selected:
+        return Response(trace=trace.digest, responder=EXTRACTIVE, output=None)
+    top = next(e for e in corpus.entries if e.digest == trace.selected[0])
+    return Response(
+        trace=trace.digest,
+        responder=EXTRACTIVE,
+        output=top.version.content,
+        cited=(top.digest,),
+    )

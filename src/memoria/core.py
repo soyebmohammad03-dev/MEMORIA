@@ -546,6 +546,105 @@ def check_response(response: Response, trace: RetrievalTrace) -> None:
         raise InvalidTransitionError("response: cites a version the retrieval did not select")
 
 
+# --- derived memory: lineage of consolidated representations ------------------------------
+
+
+class Level(StrEnum):
+    """The memory hierarchy. Every level above L1 is analysis over immutable history."""
+
+    L0 = "L0"  # raw experiences (evidence)
+    L1 = "L1"  # memory versions formed from experiences (the log)
+    L2 = "L2"  # consolidated factual memories: groups of L1 versions judged equivalent
+    L3 = "L3"  # concept memories: an entity's attributes, abstracted from L2 facts
+    L4 = "L4"  # longitudinal patterns: timelines (abstracted) and co-changes (inferred)
+
+
+class EpistemicStatus(StrEnum):
+    """What kind of claim a memory makes about the world."""
+
+    OBSERVED = "observed"  # evidence, or a memory formed directly from it (L0, L1)
+    DERIVED = "derived"  # a grouping of observed memories; asserts nothing they do not
+    ABSTRACTED = "abstracted"  # a restatement over several memories (profile, timeline)
+    INFERRED = "inferred"  # a pattern no single piece of evidence states; never a fact
+
+
+_OPERATION_STATUS = {
+    "promote": EpistemicStatus.DERIVED,
+    "merge": EpistemicStatus.DERIVED,
+    "abstract_entity": EpistemicStatus.ABSTRACTED,
+    "abstract_timeline": EpistemicStatus.ABSTRACTED,
+    "infer_co_change": EpistemicStatus.INFERRED,
+}
+_OPERATION_LEVEL = {
+    "promote": Level.L2,
+    "merge": Level.L2,
+    "abstract_entity": Level.L3,
+    "abstract_timeline": Level.L4,
+    "infer_co_change": Level.L4,
+}
+
+
+class DerivedMemory(Record):
+    """A memory produced by consolidation. It is never evidence and never enters the log.
+
+    ``versions`` are the L1 memory versions it covers and ``derived_from`` their source
+    experiences (the same meaning as on a MemoryVersion, so provenance tools apply);
+    ``parents`` are the memories it was built from directly (L1 version digests for L2,
+    derived memory ids above). ``support`` counts supporting experiences, ``disputed``
+    those whose claims assert another value for its key. ``recorded_at`` is the logical
+    time the consolidation ran. ``model`` names the embedder whose similarities decided a
+    merge, if any. ``lost`` counts input features its content does not carry (see the
+    consolidation loss report); lineage still reaches them.
+    """
+
+    memory_id: str = Field(min_length=1)
+    level: Level
+    status: EpistemicStatus
+    operation: Literal[
+        "promote", "merge", "abstract_entity", "abstract_timeline", "infer_co_change"
+    ]
+    rule: str = Field(min_length=1)  # the dedup regime or abstraction rule that fired
+    policy: Digest
+    content: str
+    key: str | None = None  # the structured claim it asserts, if any
+    value: str | None = None
+    valid_from: UTCDatetime
+    valid_to: UTCDatetime | None = None
+    recorded_at: UTCDatetime
+    parents: tuple[str, ...] = Field(min_length=1)
+    versions: Annotated[tuple[Digest, ...], AfterValidator(_canonical_set)]
+    derived_from: Annotated[tuple[Digest, ...], AfterValidator(_canonical_set)]
+    excluded: tuple[tuple[str, str], ...] = ()  # (memory considered, reason), sorted
+    conflicts: Annotated[tuple[Digest, ...], AfterValidator(_canonical_set)] = ()
+    support: int = Field(ge=1)
+    disputed: int = Field(ge=0)
+    model: Digest | None = None
+    lost: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _check_invariants(self) -> Self:
+        if self.status is not _OPERATION_STATUS[self.operation]:
+            raise ValueError(f"{self.operation} produces {_OPERATION_STATUS[self.operation]}")
+        if self.level is not _OPERATION_LEVEL[self.operation]:
+            raise ValueError(f"{self.operation} produces level {_OPERATION_LEVEL[self.operation]}")
+        if (self.key is None) != (self.value is None):
+            raise ValueError("a claim has both a key and a value, or neither")
+        if self.status is EpistemicStatus.INFERRED and self.key is not None:
+            raise ValueError("an inferred pattern never asserts a fact claim")
+        if not self.versions or not self.derived_from:
+            raise ValueError("a derived memory cites the versions and experiences it covers")
+        if self.valid_to is not None and self.valid_to <= self.valid_from:
+            raise ValueError("valid_to must be after valid_from")
+        if list(self.excluded) != sorted(set(self.excluded)):
+            raise ValueError("exclusions must be unique and sorted")
+        return self
+
+    @property
+    def version(self) -> int:
+        """Derived memories are immutable; a re-consolidation yields a new memory_id."""
+        return 1
+
+
 # --- experiments: seeded randomness, datasets, interventions, runs -------------------------
 
 
@@ -596,8 +695,14 @@ class Expectation(Record):
         return self
 
 
-class Probe(Record):
-    """A question asked of the memory system after ingestion, with its expected answer."""
+class Probe(ExtensibleRecord):
+    """A question asked of the memory system after ingestion, with its expected answer.
+
+    ``key`` (schema evolution, absent by default) names the claim key the probe asks
+    about, for retrieval policies that use structured targets. Nothing infers it from text.
+    """
+
+    _evolved = frozenset({"key"})
 
     id: str = Field(min_length=1)
     text: str
@@ -605,6 +710,7 @@ class Probe(Record):
     known_at: UTCDatetime
     limit: int = Field(default=1, ge=1)
     expected: Expectation
+    key: str | None = Field(default=None, pattern=r"^[a-z0-9_.-]+$")
 
     @property
     def query(self) -> Query:
@@ -780,17 +886,33 @@ class RunManifest(ExtensibleRecord):
     contract. The execution environment is recorded separately and is not part of it.
     """
 
-    _evolved = frozenset({"representation"})
+    _evolved = frozenset(
+        {"representation", "retriever", "retrieval_policy", "consolidation_policy"}
+    )
 
     name: str = Field(min_length=1)
     dataset: Digest
     interventions: tuple[InterventionSpec, ...] = ()
     policy: str = Field(min_length=1)
-    retriever: RetrieverSpec
+    # The Phase 2 single-stage retriever. Schema v3 makes it optional (absent iff a hybrid
+    # retrieval policy is declared); every v1/v2 manifest carries it, so digests are kept.
+    retriever: RetrieverSpec | None = None
     responder: str = Field(min_length=1)
-    # Schema v2: the vector representation a semantic retriever uses. Absent (v1) means
-    # no vectors are involved; a retriever with a semantic signal requires it.
+    # Schema v2: the vector representation a semantic stage uses. Absent (v1) means no
+    # vectors are involved.
     representation: RepresentationSpec | None = None
+    # Schema v3: a hybrid RetrievalPolicy and a ConsolidationPolicy, each a stored
+    # artifact referenced by digest (like the dataset). Absent means not used.
+    retrieval_policy: Digest | None = None
+    consolidation_policy: Digest | None = None
+
+    @model_validator(mode="after")
+    def _check_invariants(self) -> Self:
+        if (self.retriever is None) == (self.retrieval_policy is None):
+            raise ValueError("a manifest declares exactly one of retriever / retrieval_policy")
+        if self.consolidation_policy is not None and self.retrieval_policy is None:
+            raise ValueError("consolidated memory is retrieved only by a hybrid retrieval policy")
+        return self
 
 
 class StepOutcome(Record):
@@ -826,11 +948,18 @@ class RunOutcomes(Record):
     probes: tuple[ProbeOutcome, ...]
 
 
-class RunRecord(Record):
-    """The deterministic result of executing a manifest: digests of every artifact."""
+class RunRecord(ExtensibleRecord):
+    """The deterministic result of executing a manifest: digests of every artifact.
+
+    ``hierarchies`` (schema v3, absent by default) lists the consolidation hierarchies a
+    run built, in checkpoint order.
+    """
+
+    _evolved = frozenset({"hierarchies"})
 
     manifest: Digest
     dataset: Digest  # the effective dataset, after interventions
     interventions: tuple[Digest, ...]  # InterventionRecord artifacts, in application order
     log: Digest  # canonical export of the resulting memory log
     outcomes: Digest  # RunOutcomes artifact
+    hierarchies: tuple[Digest, ...] = ()

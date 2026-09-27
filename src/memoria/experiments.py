@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from importlib.metadata import version as package_version
 
 from memoria.artifacts import ArtifactStore
+from memoria.consolidation import ConsolidationPolicy, Hierarchy, consolidate, invalidated
 from memoria.core import (
     Dataset,
     Digest,
@@ -42,6 +43,8 @@ from memoria.core import (
 )
 from memoria.embeddings import Embedder, HashedNgramEmbedder
 from memoria.formation import EpisodicPolicy, FormationPolicy, StatementPolicy, form
+from memoria.hybrid import Corpus, Engine, HybridQuery, RetrievalPolicy
+from memoria.hybrid import extractive as hybrid_extractive
 from memoria.interventions import Contaminate, Delay, Drop, Inject, Intervention, Reorder
 from memoria.retrieval import (
     BM25,
@@ -54,6 +57,7 @@ from memoria.retrieval import (
     answer,
     extractive,
 )
+from memoria.semantic import SemanticIndex
 from memoria.store import MemoryLog
 
 
@@ -213,30 +217,15 @@ def execute(
     in ``store`` (manifests reference it by digest).
     """
     policy = registry.policy(manifest.policy)
+    if manifest.retriever is None:
+        return _execute_hybrid(manifest, store, registry, policy)
     uses_vectors = any(s.name == SemanticSignal.name for s in manifest.retriever.signals)
     if manifest.representation is not None and not uses_vectors:
         raise ValueError("the manifest declares a representation that no signal uses")
     retriever = registry.retriever(manifest.retriever, manifest.representation)
     responder = registry.responder(manifest.responder)
     dataset = store.get_record(Dataset, manifest.dataset)
-    interventions = [registry.intervention(spec, store) for spec in manifest.interventions]
-
-    applied = []
-    for spec, intervention in zip(manifest.interventions, interventions, strict=True):
-        derived = intervention.apply(dataset)
-        removed, added = _diff(dataset, derived)
-        applied.append(
-            store.put_record(
-                InterventionRecord(
-                    spec=spec,
-                    input=dataset.digest,
-                    output=store.put_record(derived),
-                    removed=removed,
-                    added=added,
-                )
-            )
-        )
-        dataset = derived
+    dataset, applied = _intervene(manifest, dataset, store, registry)
 
     with MemoryLog(":memory:") as log:
         steps = tuple(_ingest(log, step, policy) for step in dataset.steps)
@@ -267,6 +256,148 @@ def execute(
         interventions=tuple(applied),
         log=log_digest,
         outcomes=store.put_record(RunOutcomes(steps=steps, probes=tuple(probes))),
+    )
+    store.put_record(record)
+    store.put_record(Execution.current(record))
+    return record
+
+
+def _intervene(
+    manifest: RunManifest, dataset: Dataset, store: ArtifactStore, registry: Registry
+) -> tuple[Dataset, list[str]]:
+    """Apply the manifest's interventions in order, storing every derived dataset and record."""
+    interventions = [registry.intervention(spec, store) for spec in manifest.interventions]
+    applied = []
+    for spec, intervention in zip(manifest.interventions, interventions, strict=True):
+        derived = intervention.apply(dataset)
+        removed, added = _diff(dataset, derived)
+        applied.append(
+            store.put_record(
+                InterventionRecord(
+                    spec=spec,
+                    input=dataset.digest,
+                    output=store.put_record(derived),
+                    removed=removed,
+                    added=added,
+                )
+            )
+        )
+        dataset = derived
+    return dataset, applied
+
+
+def hybrid_uses_vectors(policy: RetrievalPolicy) -> bool:
+    return (
+        policy.signal("semantic") is not None
+        or any(g.name == "semantic" for g in policy.generators)
+        or (policy.diversity is not None and policy.diversity.similarity == "embedding")
+    )
+
+
+def _execute_hybrid(
+    manifest: RunManifest, store: ArtifactStore, registry: Registry, policy: FormationPolicy
+) -> RunRecord:
+    """A run whose probes are answered by a hybrid retrieval policy (schema v3), optionally
+    over consolidated memory rebuilt at the consolidation policy's checkpoints.
+
+    Traces and responses are stored as artifacts (they are not log records: a hybrid trace
+    covers derived memories the log never holds). Consolidation reads the log's history at
+    each checkpoint and never writes to it.
+    """
+    assert manifest.retrieval_policy is not None
+    retrieval = store.get_record(RetrievalPolicy, manifest.retrieval_policy)
+    consolidation = (
+        store.get_record(ConsolidationPolicy, manifest.consolidation_policy)
+        if manifest.consolidation_policy is not None
+        else None
+    )
+    uses_vectors = hybrid_uses_vectors(retrieval) or (
+        consolidation is not None and consolidation.uses_vectors
+    )
+    if uses_vectors != (manifest.representation is not None):
+        raise ValueError(
+            "a representation is declared iff a retrieval or consolidation stage uses vectors"
+        )
+    embedder = (
+        registry.embedder(manifest.representation.embedder)
+        if manifest.representation is not None
+        else None
+    )
+    indexed = [dict(g.params)["index"] for g in retrieval.generators if g.name == "semantic"]
+    needs_index = manifest.representation is not None and any(k != "scan" for k in indexed)
+    if needs_index and indexed != [manifest.representation.index.kind]:  # type: ignore[union-attr]
+        raise ValueError("the semantic generator's index kind must match the representation")
+    if manifest.responder != EXTRACTIVE:
+        raise ValueError(f"hybrid runs support the {EXTRACTIVE!r} responder only")
+    dataset, applied = _intervene(
+        manifest, store.get_record(Dataset, manifest.dataset), store, registry
+    )
+
+    with MemoryLog(":memory:") as log:
+        steps = tuple(_ingest(log, step, policy) for step in dataset.steps)
+        log.verify()
+        log_digest = store.put(log.export(), kind="MemoryLogExport")
+        hierarchies: list[Hierarchy] = []
+        memo = (
+            Engine(Corpus.from_log(log, dataset.steps[0].recorded_at), embedder)
+            if (dataset.steps)
+            else None
+        )  # embedding memos shared by every stage of this run (one embedder)
+        if consolidation is not None and dataset.steps and dataset.probes:
+            start = dataset.steps[0].recorded_at
+            end = max(p.known_at for p in dataset.probes)
+            for t in consolidation.checkpoints(start, end):
+                h = consolidate(Corpus.from_log(log, t), consolidation, t, embedder, memo)
+                store.put_record(h)
+                hierarchies.append(h)
+        indexes: dict[str, SemanticIndex] = {}
+        probes = []
+        for probe in dataset.probes:
+            corpus = Corpus.from_log(log, probe.known_at)
+            latest = next((h for h in reversed(hierarchies) if h.at <= probe.known_at), None)
+            if latest is not None:
+                corpus = corpus.with_derived(latest.memories, invalidated(latest, corpus))
+            index = None
+            if needs_index:
+                assert embedder is not None
+                assert manifest.representation is not None
+                key = corpus.present.digest
+                if key not in indexes:
+                    indexes[key] = SemanticIndex.build(
+                        corpus.present, embedder, store, manifest.representation.index
+                    )
+                index = indexes[key]
+            query = HybridQuery(
+                text=probe.text,
+                valid_at=probe.valid_at,
+                known_at=probe.known_at,
+                limit=probe.limit,
+                key=probe.key,
+            )
+            vectors = memo.vectors if memo is not None else {}
+            similarities = memo.similarities if memo is not None else {}
+            engine = Engine(corpus, embedder, index, vectors, similarities)
+            trace = engine.retrieve(retrieval, query)
+            response = hybrid_extractive(trace, corpus)
+            store.put_record(trace)
+            store.put_record(response)
+            probes.append(
+                ProbeOutcome(
+                    probe=probe.id,
+                    trace=trace.digest,
+                    response=response.digest,
+                    output=response.output,
+                    cited=response.cited,
+                    expected=probe.expected,
+                )
+            )
+    record = RunRecord(
+        manifest=store.put_record(manifest),
+        dataset=dataset.digest,
+        interventions=tuple(applied),
+        log=log_digest,
+        outcomes=store.put_record(RunOutcomes(steps=steps, probes=tuple(probes))),
+        hierarchies=tuple(h.digest for h in hierarchies),
     )
     store.put_record(record)
     store.put_record(Execution.current(record))

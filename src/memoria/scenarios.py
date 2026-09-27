@@ -16,6 +16,10 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
+from pydantic import Field
+
+from memoria.comparison import normalize
+from memoria.consolidation_eval import ConsolidationBenchmark, FactLabel
 from memoria.core import (
     Dataset,
     Expectation,
@@ -23,6 +27,7 @@ from memoria.core import (
     Experience,
     InterventionSpec,
     Probe,
+    Record,
     RunManifest,
     Scalar,
     Step,
@@ -706,3 +711,229 @@ def hybrid_benchmark() -> tuple[Dataset, HybridBenchmark]:
         ),
         cases=HYBRID_CASES,
     )
+
+
+# --- Phase 7 consolidation worlds ------------------------------------------------------------
+
+_ENTITIES = ("Ana", "Ben", "Chen", "Dara", "Eli")
+_VALUES = {
+    "home": ("Paris", "Berlin", "Munich", "Rome", "Oslo", "Lisbon", "Vienna", "Prague"),
+    "employer": ("Acme", "Globex", "Initech", "Umbrella", "Hooli", "Vandelay"),
+    "dose": ("5 mg", "10 mg", "20 mg", "40 mg"),
+}
+_NOTES = {
+    "home": ("{e} lives in {v}.", "{e}'s home is {v}."),
+    "employer": ("{e} works at {v}.", "{e} is employed by {v}."),
+    "dose": ("{e} takes {v} each morning.", "{e} takes {v}."),  # the second drops a qualifier
+}
+_QUESTIONS = {
+    "home": "Where does {e} live?",
+    "employer": "Where does {e} work?",
+    "dose": "How much does {e} take?",
+}
+_NEGATED = {
+    "home": "{e} does not live in {v}.",
+    "employer": "{e} does not work at {v}.",
+    "dose": "{e} does not take {v}.",
+}
+
+
+class WorldSpec(Record):
+    """Parameters of a generated consolidation world. Every choice is seeded (I21)."""
+
+    name: str = Field(min_length=1)
+    seed: int
+    entities: int = Field(ge=1, le=len(_ENTITIES))
+    attributes: tuple[str, ...] = ("dose", "employer", "home")
+    horizon_days: int = Field(ge=10)
+    change_every_days: float = Field(gt=0)
+    repetition: int = Field(default=2, ge=0)  # extra reports per period
+    note_share: float = Field(default=0.5, ge=0, le=1)  # repetitions stated as free text
+    contradiction_rate: float = Field(default=0.0, ge=0, le=1)  # same-instant rival reports
+    poison: int = Field(default=0, ge=0)  # rival copies per contradiction (unreliable)
+    correction_rate: float = Field(default=0.0, ge=0, le=1)  # wrong first, then corrected
+    delay_days: float = Field(default=0.0, ge=0)  # ingestion delay (reports arrive late)
+    temporary_rate: float = Field(default=0.0, ge=0, le=1)  # brief values that revert
+    noise: int = Field(default=0, ge=0)  # irrelevant notes
+    negations: bool = False  # negated notes about the previous value after a change
+    grid_days: float | None = Field(default=None, gt=0)  # snap change times (coincidences)
+    coupled: bool = False  # the first entity's home and employer change together
+    probes_per_key: int = Field(default=4, ge=1)
+
+
+def consolidation_world(spec: WorldSpec) -> tuple[Dataset, ConsolidationBenchmark]:
+    """A seeded long-horizon world of changing facts and the reports about them.
+
+    Each key (``<entity>.<attribute>``) has true periods; each period is reported by a
+    statement and ``repetition`` restatements (statements or free-text notes), possibly
+    delayed, contradicted at the same instant by ``poison`` unreliable reports, reported
+    wrongly first and then corrected, or briefly interrupted by a temporary value. Every
+    report is labelled with its (key, value, true period); probes carry the key and an
+    epistemic expectation computed from the reports (Phase 3 standard).
+    """
+
+    def u(*labels: str | int) -> float:
+        return unit_interval(spec.seed, spec.name, *labels)
+
+    def pick(options: tuple[str, ...], avoid: str | None, *labels: str | int) -> str:
+        choices = [o for o in options if o != avoid]
+        return choices[int(u(*labels) * len(choices))]
+
+    def snap(t: float) -> float:
+        g = spec.grid_days
+        return round(t / g) * g if g else t
+
+    steps: list[Step] = []
+    labels: list[FactLabel] = []
+    reports: dict[str, list[tuple[datetime, datetime, str, str | None]]] = defaultdict(list)
+    counter = [0]
+
+    def report(key: str, occurred: float, recorded: float, content: str, cls: str,
+               verb: str, value: str | None, period: int) -> None:  # fmt: skip
+        counter[0] += 1
+        source = f"{cls}:{spec.name}-{counter[0]}"
+        steps.append(
+            Step(
+                experience=Experience(source=source, content=content, occurred_at=day(occurred)),
+                recorded_at=day(recorded),
+            )
+        )
+        if value is not None:
+            labels.append(FactLabel(candidate=source, key=key, value=" ".join(normalize(value)),
+                                    period=period))  # fmt: skip
+        if verb in ("set", "correct", "forget"):
+            reports[key].append((day(occurred), day(recorded), verb, value))
+
+    change_times: dict[str, list[float]] = {}
+    keys = [(e, a) for e in _ENTITIES[: spec.entities] for a in spec.attributes]
+    for e, a in keys:
+        key = f"{e.lower()}.{a}"
+        partner = f"{_ENTITIES[0].lower()}.home"
+        if spec.coupled and e == _ENTITIES[0] and a == "employer" and partner in change_times:
+            times = list(change_times[partner])
+        else:
+            times, t = [0.0], 0.0
+            while True:
+                t += spec.change_every_days * (0.5 + u(key, "gap", len(times)))
+                if t >= spec.horizon_days:
+                    break
+                times.append(snap(t))
+            times = sorted(set(times))
+        change_times[key] = times
+        value: str | None = None
+        for i, start in enumerate(times):
+            end = times[i + 1] if i + 1 < len(times) else float(spec.horizon_days)
+            previous, value = value, pick(_VALUES[a], value, key, "value", i)
+            delay = u(key, "delay", i) * spec.delay_days
+            first = value
+            if u(key, "wrong", i) < spec.correction_rate:
+                first = pick(_VALUES[a], value, key, "wrong-value", i)
+            report(key, start, start + delay, f"set {key} = {first}", "chat", "set", first, i)
+            if first != value:  # reported wrongly, corrected a little later (retroactively)
+                fix = min(end - 0.01, start + 1 + 2 * u(key, "fix", i))
+                report(key, fix, fix + delay, f"correct {key} = {value}", "clinic", "correct",
+                       value, i)  # fmt: skip
+            if u(key, "rival", i) < spec.contradiction_rate:
+                rival = pick(_VALUES[a], value, key, "rival-value", i)
+                for _ in range(max(1, spec.poison)):
+                    report(key, start, start + delay, f"set {key} = {rival}", "forum", "set",
+                           rival, i)  # fmt: skip
+            for r in range(spec.repetition):
+                at = start + (end - start) * (r + 1) / (spec.repetition + 1)
+                if u(key, "note", i, r) < spec.note_share:
+                    template = _NOTES[a][int(u(key, "template", i, r) * 2)]
+                    report(key, at, at + delay, template.format(e=e, v=value), "email", "note",
+                           value, i)  # fmt: skip
+                else:
+                    report(key, at, at + delay, f"set {key} = {value}", "email", "set", value, i)
+            if spec.negations and previous is not None:
+                at = start + 0.5
+                report(key, at, at + delay, _NEGATED[a].format(e=e, v=previous), "chat", "note",
+                       None, i)  # fmt: skip
+            if u(key, "temporary", i) < spec.temporary_rate and end - start > 10:
+                brief = pick(_VALUES[a], value, key, "temporary-value", i)
+                at = start + (end - start) / 2
+                report(key, at, at + delay, f"set {key} = {brief}", "chat", "set", brief, i)
+                back = at + 3
+                report(key, back, back + delay, f"set {key} = {value}", "chat", "set", value, i)
+    for n in range(spec.noise):
+        e = _ENTITIES[int(u("noise-entity", n) * spec.entities)]
+        at = u("noise-time", n) * spec.horizon_days
+        text = ("{e} enjoyed the weather today.", "{e} called about the weekend plans.")[n % 2]
+        report("-", at, at, text.format(e=e), "chat", "note", None, 0)
+
+    probes = []
+    for e, a in keys:
+        key = f"{e.lower()}.{a}"
+        for p in range(spec.probes_per_key):
+            valid = u(key, "probe-valid", p) * spec.horizon_days
+            known = min(spec.horizon_days + spec.delay_days, valid + u(key, "probe-known", p) * 30)
+            expected = epistemic(reports[key], valid_at=day(valid), known_at=day(known))
+            probes.append(
+                Probe(
+                    id=f"{key}-{p}",
+                    text=_QUESTIONS[a].format(e=e),
+                    valid_at=day(valid),
+                    known_at=day(known),
+                    expected=expected,
+                    key=key,
+                )
+            )
+    steps.sort(key=lambda s: (s.recorded_at, s.experience.source))
+    dataset = Dataset(name=f"world:{spec.name}", version=spec.digest, steps=tuple(steps),
+                      probes=tuple(probes))  # fmt: skip
+    coupled = ((f"{_ENTITIES[0].lower()}.employer", f"{_ENTITIES[0].lower()}.home"),)
+    return dataset, ConsolidationBenchmark(
+        name=spec.name,
+        version=spec.digest,
+        dataset=dataset.digest,
+        labels=tuple(labels),
+        coupled=coupled if spec.coupled else (),
+    )
+
+
+def epistemic(
+    reports: list[tuple[datetime, datetime, str, str | None]],
+    *,
+    valid_at: datetime,
+    known_at: datetime,
+) -> Expectation:
+    """Epistemic truth over (occurred, recorded, verb, value) reports: among reports
+    recorded by ``known_at``, the latest occurring by ``valid_at`` holds; a later
+    ``correct`` replaces it retroactively (up to the next report); equal-time
+    disagreement is contested; ``forget`` leaves nothing (the Phase 3 standard)."""
+    visible = sorted((o, v, x) for o, r, v, x in reports if r <= known_at)
+    held = [x for x in visible if x[0] <= valid_at]
+    if not held:
+        return UNKNOWN
+    latest = max(o for o, _, _ in held)
+    current = [x for x in held if x[0] == latest]
+    later = [o for o, v, _ in visible if o > latest and v != "correct"]
+    horizon = min(later, default=None)
+    fixes = [x for x in visible if x[1] == "correct" and x[0] > latest
+             and (horizon is None or x[0] < horizon)]  # fmt: skip
+    if fixes:
+        last = max(o for o, _, _ in fixes)
+        current = [x for x in fixes if x[0] == last]
+    if any(v == "forget" for _, v, _ in current):
+        return UNKNOWN
+    values = {x for _, _, x in current if x is not None}
+    return known(values.pop()) if len(values) == 1 else contested(*sorted(values))
+
+
+PHASE7_WORLDS = (
+    WorldSpec(name="baseline", seed=7, entities=3, horizon_days=360, change_every_days=90),
+    WorldSpec(name="short", seed=7, entities=3, horizon_days=90, change_every_days=45),
+    WorldSpec(name="long", seed=7, entities=3, horizon_days=1080, change_every_days=120),
+    WorldSpec(name="contradiction", seed=7, entities=3, horizon_days=360, change_every_days=90,
+              contradiction_rate=0.5, correction_rate=0.3),
+    WorldSpec(name="drift", seed=7, entities=3, horizon_days=360, change_every_days=25,
+              delay_days=15, temporary_rate=0.3),
+    WorldSpec(name="repetitive", seed=7, entities=3, horizon_days=360, change_every_days=90,
+              repetition=6),
+    WorldSpec(name="noisy", seed=7, entities=3, horizon_days=360, change_every_days=90,
+              noise=60, delay_days=10),
+    WorldSpec(name="adversarial", seed=7, entities=3, horizon_days=360, change_every_days=60,
+              repetition=3, contradiction_rate=0.4, poison=3, negations=True, grid_days=30,
+              coupled=True),
+)  # fmt: skip

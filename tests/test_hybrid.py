@@ -122,6 +122,7 @@ def test_signal_registry_declares_every_contract_field() -> None:
         "recency",
         "semantic",
         "source",
+        "support",
         "temporal",
         "type",
     }
