@@ -22,7 +22,7 @@ questions (RQ1–RQ15), target architecture and staged roadmap to Phase 22 are i
 
 ## Status
 
-**Phases 1–5 complete.** What exists today:
+**Phases 1–6 complete.** What exists today:
 
 - **Memory history** (`core`, `store`): content-addressed, immutable, bitemporal records;
   create / update / correct / forget; an append-only, verified SQLite log
@@ -43,11 +43,19 @@ questions (RQ1–RQ15), target architecture and staged roadmap to Phase 22 are i
   extra; verifiable semantic indexes with exact search and optional FAISS HNSW candidate
   generation; a controlled lexical-vs-neural study
   ([results](docs/experiments/phase5-semantic.md))
+- **Hybrid retrieval** (`hybrid`, `hybrid_eval`): candidate generation (lexical, semantic,
+  metadata), recorded hard filters, nine signals with explicit missing values, declared
+  normalisation, weighted and rank-fusion policies, MMR diversity and contradiction
+  exposure, all as content-addressed policies whose traces re-derive every score and
+  explanation; ablations, leave-one-out, counterfactuals and adversarial cases with paired
+  statistics ([results](docs/experiments/phase6-hybrid.md))
 
 Neural embeddings are an experimental representation, not ground truth: in the Phase 5
 study they rate numeric changes and contradictions as similar to a query as true
-paraphrases. No hybrid ranking, consolidation, memory graph, API or UI exists yet. This
-README describes only what is implemented.
+paraphrases. In the Phase 6 study, a superseded claim outranked the current one under
+policies that surface rather than penalise conflict. Retrieval relevance is a policy
+score, not truth. No consolidation, memory graph, API or UI exists yet. This README
+describes only what is implemented.
 
 The core needs no neural dependencies. For the neural representation and approximate
 search, install the extras and fetch the pinned model explicitly (nothing downloads
@@ -88,7 +96,9 @@ for embedder in (HashedNgramEmbedder(), neural):  # control condition, then neur
         print(embedder.spec.name, hit.rank, round(hit.similarity, 3), hit.version[:16])
 ```
 
-The full study is one command: `python -m memoria.semantic_eval var/artifacts`.
+The Phase 5 study is one command: `python -m memoria.semantic_eval var/artifacts`; the
+Phase 6 study is `python -m memoria.hybrid_eval var/artifacts minilm` (or `hashed`, which
+needs no model).
 
 ## Research areas
 

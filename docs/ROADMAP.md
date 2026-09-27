@@ -12,7 +12,8 @@ its validation criteria hold in CI.
 Phases 1–4 are complete and form the **substrate**: bitemporal append-only history
 (1), formation and retrieval with traces (2), reproducible experiments with
 interventions (3), and evaluation with a failure taxonomy and paired statistics (4).
-Phases 5–22 build on it without weakening any invariant.
+Phases 5–22 build on it without weakening any invariant. Phases 5 (semantic memory) and 6
+(hybrid, explainable retrieval) are complete.
 
 ---
 
@@ -39,8 +40,8 @@ Phases 5–22 build on it without weakening any invariant.
   the spec); every neighbour traces to a memory version; the core suite runs without
   neural dependencies.
 - **Dependencies:** Phases 1–4.
-- **Deferred:** semantic signals inside ranking (Phase 6); representations beyond
-  memory content — entities, relations (Phases 7–8).
+- **Deferred:** representations beyond memory content — entities, relations (Phases
+  7–8). (Semantic signals inside ranking: done in Phase 6.)
 - **Status:** complete. Reference embedder and exact index; `onnx-sentence` adapter with
   MiniLM-L6 pinned by revision and file hashes (optional `neural` extra); FAISS HNSW
   candidate generation with exact re-scoring (optional `ann` extra); manifest schema v2
@@ -71,6 +72,25 @@ Phases 5–22 build on it without weakening any invariant.
   value (numeric changes and contradictions score like paraphrases); the reference and
   neural representations overlap in only 56% of top-5 results. Hybrid ranking should be
   evaluated on exactly these failure modes, with ANN as candidate generation.
+- **Status:** complete. `memoria.hybrid` provides a corpus of every known version, three
+  candidate generators (lexical, semantic via exact or HNSW index, metadata), typed hard
+  filters, nine registered signals with explicit missing-value semantics, four versioned
+  normalisations, weighted and rank-fusion scoring, MMR diversity, four contradiction
+  exposure modes, and self-checking traces whose explanations and score decompositions are
+  re-derived on load. `memoria.hybrid_eval` runs the ablation ladder, leave-one-out against
+  two references, counterfactual perturbations, twelve adversarial cases and paired
+  statistics on a hand-built benchmark, with separate performance records. Results:
+  docs/experiments/phase6-hybrid.md. Validation as held: every selected memory's rank
+  (and every score) is reproducible from the trace alone, and policies are compared with
+  paired statistics from `memoria.statistics`. **Deviation:** the comparisons run inside
+  the hybrid experiment on benchmark queries, not through `evaluation.compare`, because
+  hybrid policies are not yet a run-manifest variable.
+- **Deferred:** a run-manifest field for retrieval policies, so `experiments.execute` and
+  `evaluation.compare` cover hybrid retrieval (with the first run that needs it, Phases
+  13/18); claims for free-text memories (Phases 7–8); corrections that are retroactive at
+  the memory level, not only the claim level (Phase 11); memory confidence as a signal
+  (Phase 12); a larger generated benchmark (Phase 15); indexing every version for the
+  semantic generator; learned or adaptive weights (Phase 13).
 
 ## Phase 7 — Memory consolidation and abstraction (L3, L1)
 

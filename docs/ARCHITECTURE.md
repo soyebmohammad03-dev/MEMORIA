@@ -28,7 +28,8 @@ experience → encoding → memory formation → consolidation → memory repres
 
 Every arrow is a recorded, replayable transformation with provenance. Phases 1–4
 implement experience → formation → representation (bitemporal versions) → retrieval →
-response → evaluation; the remaining arrows are the roadmap (§8).
+response → evaluation; Phase 5 adds vector representations and indexing, and Phase 6
+decomposes retrieval into recorded stages (§4.10). The remaining arrows are the roadmap (§8).
 
 ### 1.2 Research questions
 
@@ -52,6 +53,10 @@ claims only when backed by stored runs and statistics (Principles 1, 3, 4).
 | RQ13 | How does memory capacity affect forgetting and interference? |
 | RQ14 | How does retrieval frequency change future recall? |
 | RQ15 | Can the system explain exactly why a particular memory influenced a response? |
+
+Phase 6 asks an operational question serving RQ7, RQ12 and RQ15: *when multiple memory
+signals disagree, which memories are retrieved, why are they ranked that way, and how
+sensitive is the ranking to each signal?* (§4.10, docs/experiments/phase6-hybrid.md).
 
 ## 2. Research Principles
 
@@ -122,6 +127,14 @@ These are enforced in code and tests, not by convention.
 | I37 | Reproduction is classified, never assumed: *identical* (bytes), *equivalent* (within the spec's declared tolerance), or *different*. Deterministic embedders declare no tolerance, so only identity passes. |
 | I38 | The exact index is the reference. An approximate index only proposes candidates; every reported similarity is the exact cosine, and what the approximation loses is measured. |
 | I39 | A comparison accounts for every manifest field: the retriever and its representation form one variable ("retrieval"), and a manifest field no variable covers is an error. |
+| I40 | A retrieval policy is a content-addressed record naming everything that changes a ranking: generators and their limits, hard filters, signals with weights, normalisation, parameters and missing-value behaviour, scoring method, exposure mode, diversity and tie-break. Generators and signals are listed in name order; weights are finite, positive and sum to 1. |
+| I41 | Hard filters precede scoring. An excluded candidate records its reason from a closed vocabulary and is never scored, normalised against or ranked. Malformed provenance is always excluded (I4). |
+| I42 | Missing is not zero: an unavailable signal records why, and the policy declares whether the query fails or the signal is omitted; an omitted contribution is recorded as omitted. Non-finite or out-of-range values are errors. |
+| I43 | A hybrid trace re-derives, from recorded raw values alone: every normalised value, contribution, relevance (= sum of contributions), final score (= relevance − redundancy penalty), the stage order, exposure placements, selection and every explanation. Explanations are derived from recorded numbers, never generated. |
+| I44 | No retrieval order depends on dictionary, set, library, filesystem or process order: candidates are listed by (memory_id, version, digest) and ranked by (final, relevance, memory_id, version, digest). |
+| I45 | Relevance is a retrieval-policy score, not truth, confidence or memory quality. Temporal compatibility, recency, source priors and conflict status are separate recorded signals; contradictions are exposed, never resolved, in retrieval. |
+| I46 | Retrieval never falls back silently: a failing generator raises unless the policy declares that failures are recorded; a policy that needs an embedder or index it was not given is refused; approximate candidates are re-scored exactly (I36, I38). |
+| I47 | A hybrid experiment's identity is its spec (benchmark, representation, policies, ablation design, cut-offs, confidence, alpha). Traces are stored and re-verifiable; timings and memory are a separate `PerformanceRecord`. |
 
 Tooling standard: Python ≥3.12, Pydantic v2, `mypy --strict`, Ruff, pytest with warnings
 as errors, `uv` with a committed lockfile, CI on every push.
@@ -157,6 +170,11 @@ as errors, `uv` with a committed lockfile, CI on every push.
 | **RepresentationSpec / IndexSpec** | A retrieval representation: embedder plus index (exact, or HNSW via FAISS). Declared in manifest schema v2. | `core.py` |
 | **Semantic index** | Embeddings of a memory state as a stored, verifiable artifact; exact search, optional approximate candidate generation. | `semantic.py`, `vectors.py` |
 | **Semantic experiment** | A content-addressed comparison of representations on a labelled diagnostic, with timings recorded separately. | `semantic_eval.py` |
+| **Corpus** | Every content-bearing memory version known at `known_at`, with its fate in its chain (held, superseded, forgotten), effective interval and structured claim — what hybrid retrieval can consider, including what filters will exclude. | `hybrid.py` |
+| **Retrieval policy** | A versioned, content-addressed hybrid retrieval configuration (I40). | `hybrid.py` |
+| **Signal** (hybrid) | A named, versioned feature with a declared direction and range; per candidate a raw value or a recorded reason it is missing (I42). | `hybrid.py` |
+| **Hybrid trace** | Generator runs, the candidate union with exclusions, every survivor's signals, contributions, penalties and placement, the selection and explanations; self-checking (I43). | `hybrid.py` |
+| **Hybrid experiment** | Policies × benchmark queries with metrics, diagnostics, ablations, leave-one-out, counterfactuals, adversarial cases and paired statistics. | `hybrid_eval.py` |
 | **Autopsy** | The provenance DAG from a response back through retrieval → versions → operations → experiences, at a point in both time axes. | Phase 17 |
 
 The `update`/`correct` distinction is deliberate: it separates *temporal change* from
@@ -233,8 +251,10 @@ they are baselines, not tuned values. The `extractive-top1-v1` responder answers
 the top selected memory's content verbatim and abstains when nothing is selected.
 
 Known limits: tie-breaking by `memory_id` is deterministic but semantically arbitrary
-(the episodic baseline demonstrably returns a stale report on a three-way tie); no
-dense/semantic signal enters ranking yet (Phase 6; embeddings exist since Phase 5, §4.6).
+(the episodic baseline demonstrably returns a stale report on a three-way tie). This
+single-stage `Retriever` remains the retriever of experiment runs, unchanged; multi-stage
+hybrid retrieval (candidate generation, filters, normalisation, fusion, diversity,
+exposure) is `memoria.hybrid` (§4.10) and is not yet a run-manifest variable.
 
 ### 4.4 Experiment semantics
 
@@ -403,8 +423,8 @@ in performance records.
 **In runs.** `retrieval.SemanticSignal` scores every memory of the queried state by exact
 cosine under the manifest's embedder (score = max(cosine, 0), raw cosine recorded; as a
 gate, eligible iff cosine > 0 — orthogonality, not a tuned threshold). Because a signal
-must score every memory, runs use the exact index; approximate candidate generation in
-ranking belongs to Phase 6.
+must score every memory, runs use the exact index; approximate candidate generation is
+used by the hybrid engine's semantic generator (§4.10).
 
 ### 4.7 Experiment degrees of freedom and manifest schema v2
 
@@ -462,6 +482,149 @@ the attainable maximum, reciprocal rank, false matches and misses by label, pair
 Newcombe/McNemar differences, top-k overlap). Paired items share queries, so intervals
 may be optimistic. Results: docs/experiments/phase5-semantic.md.
 
+### 4.10 Hybrid retrieval semantics (Phase 6)
+
+`memoria.hybrid` separates seven concerns. They stay separate in code, records and
+experiments:
+
+| Concern | Question it answers | Where |
+|---|---|---|
+| Representation | How is a memory encoded (tokens, vectors)? | `retrieval.tokenize`, `embeddings`, `semantic` |
+| Candidate generation | Which memories are considered at all? | generators in `Engine._generate` |
+| Hard filtering | Which considered memories may not be returned, and why? | `Exclusion`, policy `exclude` |
+| Feature extraction | What does each signal say about each survivor? | `SIGNALS` registry, `SignalValue` |
+| Scoring | How do signals combine into relevance? | normalisation, weighted sum or RRF |
+| Reranking | How is the order adjusted beyond relevance? | MMR diversity, contradiction exposure |
+| Evaluation | What did the policy retrieve, measured against designed roles? | `hybrid_eval` |
+
+```
+MemoryLog ──► Corpus(known_at): every version with fate, effective interval, claim
+                 │
+   ┌─────────────┼──────────────┐
+ lexical      semantic       metadata          candidate generation (each: rank, score,
+ BM25 > 0   index top-k      claim key            limit, truncation, status, error)
+   └─────────────┼──────────────┘
+          candidate union ─────────────────►   merged by version; generator hits kept
+                 │
+          hard filters ────────────────────►   excluded(reason): future, expired,
+                 │                               superseded, forgotten, malformed provenance
+          features: SignalValue(raw | missing, inputs)   per policy signal
+                 │
+          normalisation (bounded | minmax | rank | zscore, over survivors)
+                 │
+          relevance = Σ contribution           weighted: w·direction·normalised
+                 │                              rrf:      w / (k + rank)
+          diversity (optional MMR): final = relevance − β·max(0, similarity to earlier)
+                 │
+          exposure: neutral | penalize (signal) | surface (counter-evidence) | paired
+                 │
+          ranking, selection, Explanation(reasons, text) ─► HybridTrace (self-checking)
+```
+
+**Corpus.** Hybrid retrieval considers every non-tombstone version recorded by `known_at`,
+not only the state at (`valid_at`, `known_at`), so temporal and history exclusions are
+recorded rather than silent. Each version's *fate* comes from its chain (`core.beliefs`):
+held (with its effective interval), superseded (removed by a later CORRECT) or forgotten
+(chain ends in FORGET). Its *claim* comes from its cited experiences through the statement
+language; a version citing experiences with different claims has none (`ambiguous`), and
+free text has none (`unstructured`).
+
+**Temporal status** at `valid_at`: valid (interval contains it), expired (ended at or
+before), future (starts after), superseded, forgotten. A memory from before `valid_at` is
+not "wrong", and the newest memory is not "right": temporal status is compatibility with
+the requested time, not truth. Every version carries `valid_from`, so "temporally
+unspecified" cannot arise from current memory types.
+
+**Conflict status** (Phase 4 relations on the claim's key, judged at `valid_at`), in
+priority order: forgotten (a later `forget` occurring by `valid_at`), corrected (a later
+`correct`; retroactive), contradicted (another value at the same instant), superseded (a
+later value occurring by `valid_at`), supported (same value elsewhere), undisputed;
+`retraction` for a `forget` claim itself; unavailable without a claim. *Counter-evidence*
+for a memory is every version asserting another value for its key (older or newer) or
+retracting it.
+
+**Generators.** `lexical`: BM25 over the corpus (statistics from the corpus), proposing
+scores > 0. `semantic`: a `SemanticIndex` (exact or HNSW, declared by the policy) over the
+state at (`known_at`, `known_at`); a stale or mismatched index is a generator failure.
+`metadata`: memories whose claim key equals the query key; *not applicable* without a key.
+Each proposes at most its limit, ordered by (score desc, memory_id, version, digest), and
+records how many qualifying candidates the limit dropped.
+
+**Signals** (`SIGNALS`; name, version, direction, declared range):
+
+| Signal | Raw value | Missing when |
+|---|---|---|
+| `lexical` | BM25 score (unbounded) | never (0 is real evidence of no overlap) |
+| `semantic` | exact float32 cosine, [−1, 1] | never (an embedder is required) |
+| `recency` | 0.5^(age/half-life), family `exponential`, axis `recorded` (age to `known_at`) or `valid` (age to `valid_at`) | valid axis and not yet valid |
+| `temporal` | 1 if valid at `valid_at`, else 0 (compatibility) | never |
+| `source` | declared prior of the cited sources' class (`<class>:<id>`); several sources: the minimum | unstructured or undeclared source |
+| `provenance` | fraction of cited experiences resolved with a structured source id | never |
+| `type` | 1 if the memory kind (fact/note) is requested | query requests no kind |
+| `attribute` | 1 if claim key = query key; entity-only match is 0 (recorded as input) | no query key or no claim |
+| `contradiction` | 1 if the conflict status is corrected, contradicted, superseded or forgotten; direction −1 | no claim |
+
+Recency and temporal validity are distinct signals by design: a memory can be recent and
+irrelevant to a historical query, or old and exactly right for it.
+
+**Normalisation** is declared per signal and versioned (`bounded-v1`: over the declared
+range, identity for [0, 1] signals; `minmax-v1`; `rank-v1`: (n − r + 1)/n with shared
+ranks for ties; `zscore-v1`: population sd), computed over surviving candidates with
+available values. Degenerate pools map to documented rank-neutral constants (min-max and
+z-score 0, rank 1). Non-finite values and overflow raise; missing values stay missing.
+
+**Scoring.** `weighted`: contribution = weight × direction × normalised. `rrf` (Cormack,
+Clarke & Büttcher 2009, k = 60): contribution = weight / (k + rank), ranks by
+direction × normalised with shared (competition) ranks for ties. Relevance = Σ
+contributions, quantised; missing values contribute 0 and are marked omitted (or the query
+fails, per the policy).
+
+**Diversity** (optional): greedy MMR in penalty form, final = relevance − β·max(0, max
+similarity to the items placed before), equivalent in order to MMR with λ = 1/(1 + β);
+similarity is the embedding cosine or token Jaccard. Relevance is never modified, so
+disabling diversity reproduces the pure relevance order.
+
+**Exposure** (after diversity, so MMR cannot suppress what exposure is for): `neutral`;
+`penalize` (the contradiction signal is scored); `surface` (the default: each selected
+result carries its surviving counter-evidence, and the order is unchanged); `paired` (within
+the limit, each result is followed by its best-placed surviving counter-evidence).
+
+**Explanations** are reason codes (`supports:<signal>` for the two largest positive
+contributions, `opposes:`, `missing:`, `temporal:`, `conflict:`, `generators:`,
+`redundant`, `paired`, `counter_evidence`) plus a text rendered deterministically from
+those codes and the recorded numbers. The trace validator re-derives both.
+
+**Tie-breaking**: final desc, relevance desc, memory_id, version number, digest. Greedy MMR
+selects by the same key, so the stage order satisfies it too.
+
+Known limits: free-text memories carry no claim, so attribute and conflict signals are
+unavailable for them (a free-text restatement of a corrected value escapes conflict
+detection). An episodic memory is valid from when it occurred, so the temporal filter
+excludes a retroactive correction for earlier valid times. The semantic generator covers
+only the state at (`known_at`, `known_at`); other versions enter through the other
+generators, and features stay exact for every candidate. Query-independent signals
+(provenance, source) add the same offset regardless of topic, which interacts with
+diversity. There is no tenant or session scope in MEMORIA, so there is no such filter.
+Hybrid policies are not yet run-manifest variables, so `evaluation.compare` does not
+cover them; policy comparisons use paired tests over benchmark queries inside the hybrid
+experiment.
+
+### 4.11 Hybrid retrieval methodology
+
+`hybrid_eval.run_hybrid_experiment` runs every policy of a `HybridExperimentSpec` on every
+benchmark query against one corpus, stores every trace, and records per-query diagnostics
+(candidate counts per generator, union, exclusions by reason, signal distributions,
+ranking, target ranks, exposure, diversity moves, rank changes against the reference). It
+computes metrics against designed roles: recall, fact recall, precision and nDCG at k;
+MRR; exposure; redundancy; temporal validity. The ablation ladder is compared step by step
+and each leave-one-out variant against its reference with `memoria.statistics`: Newcombe
+method 10, exact McNemar, Holm within family × measure, and an underpowered flag. The
+experiment also records counterfactual stability per perturbation class (invariant:
+paraphrase, reordering, irrelevant wording; information-changing: entity, attribute, time,
+negation, number) and adversarial cases. `reproduce_hybrid` re-runs and compares byte for
+byte; `verify_experiment` re-reads and re-validates every trace. Results:
+docs/experiments/phase6-hybrid.md.
+
 ## 5. Module Boundaries
 
 The dependency rule is strict: **dependencies point inward toward `core`**. `core` imports
@@ -486,6 +649,8 @@ semantic      semantic index artifacts, exact search, approximate candidates  (e
 neural        local neural embedder adapter, pinned model identities  (exists; extra 'neural')
 vectors       FAISS HNSW candidate generation  (exists; extra 'ann')
 semantic_eval representation experiments, exact-vs-ANN, scaling  (exists)
+hybrid        corpus, generators, filters, signals, policies, explainable traces  (exists)
+hybrid_eval   hybrid benchmarks, ablations, counterfactuals, paired statistics  (exists)
 provenance    autopsy / provenance graph (NetworkX)
 api           FastAPI surface over the above (no logic of its own)
 observatory   interactive visualisation (consumes api only)
@@ -503,8 +668,8 @@ sources, and every experiment reproduces from its manifest.
 | L1 Memory core | Typed memories: episodic and semantic memories, temporal facts, entities, relations, sources, confidence, validity, lineage, consolidation state, supersession, contradiction and abstraction relationships — as explicit types, not a universal object | `core` versions and history | 1 ✓, extended 7, 8, 11, 12 |
 | L2 Formation | Pluggable policies (verbatim, keyed, abstraction, entity-centric, relation extraction, summarisation, hybrid); experience → decision → memory → evidence | `formation` | 2 ✓, extended 7 |
 | L3 Consolidation | candidate → validation → deduplication → merging → abstraction → durable memory, with lineage to every supporting experience | L1, L2, L5 | 7 |
-| L4 Hybrid retrieval | Decomposed signals (lexical, semantic, temporal, recency, reliability, confidence, provenance, contradiction, diversity), rerankers, adaptive policies | `retrieval` signals and traces | 2 ✓, 6, 13 |
-| L5 Semantic memory | Local embedders and indexes as artifacts | `artifacts`, `core` states | 5 (slice 1 ✓) |
+| L4 Hybrid retrieval | Decomposed signals (lexical, semantic, temporal, recency, reliability, confidence, provenance, contradiction, diversity), rerankers, adaptive policies | `retrieval` signals and traces | 2 ✓, 6 ✓, 13 |
+| L5 Semantic memory | Local embedders and indexes as artifacts | `artifacts`, `core` states | 5 ✓ |
 | L6 Memory graph | Provenance and semantic graph with snapshots | all records | 8 |
 | L7 Forgetting lab | Forgetting mechanisms as policies and interventions; nothing deleted | history, interventions | 9 |
 | L8 Interference lab | Controlled similarity, density and repetition | L4, L5, datasets | 10 |
@@ -535,6 +700,9 @@ introduced **when the first implementation is written** (not as empty scaffoldin
   `Registry.extend(embedders=...)`; `neural.neural_embedders()` provides the neural entry.
 - `neural.TransformerBackend` — tokeniser plus encoder under the neural adapter (exists:
   `OnnxBackend`)
+- `hybrid.SIGNALS` — hybrid signal definitions (name, version, direction, range, parameter
+  check, extractor); `hybrid.GeneratorSpec` names the candidate generators. A new signal is
+  a registry entry plus its tests; policies refer to it by name (I40).
 - `Dataset` (a record, not a protocol: any generator producing one plugs in)
 - Evaluation components are versioned names in `EvaluationSpec` (`tokens-v1`,
   `provenance-v1`, readers). One implementation each exists, so there is no registry;
@@ -598,7 +766,7 @@ deferrals — is in [ROADMAP.md](ROADMAP.md).
 | 3 ✓ | Experiment runner: manifests, seeds, datasets, interventions, artifact store | Re-running a manifest reproduces its artifacts |
 | 4 ✓ | Evaluation: metrics, interval estimates, paired tests, failure taxonomy | Baseline vs. intervention comparison with CIs |
 | 5 ✓ | Semantic memory and local embedding infrastructure | Index rebuilds reproduce vectors; neighbours trace to versions; core runs without neural deps |
-| 6 | Hybrid retrieval and explainable ranking | Rank reproducible from trace; policies compared with paired statistics |
+| 6 ✓ | Hybrid retrieval and explainable ranking | Rank reproducible from trace; policies compared with paired statistics |
 | 7 | Memory consolidation and abstraction | Every consolidated memory has lineage to all supporting experiences |
 | 8 | Provenance and semantic memory graph | Graph is a pure, reproducible function of stored artifacts |
 | 9 | Forgetting laboratory | Every forgotten memory reconstructible; retention measured with intervals |
@@ -668,3 +836,19 @@ deferrals — is in [ROADMAP.md](ROADMAP.md).
 | 2026-09-27 | Semantic retrieval in runs gates on cosine > 0. Rejected: a tuned similarity threshold. | Zero is the natural boundary (orthogonality); thresholds are Phase 6 policy decisions, to be measured. |
 | 2026-09-27 | Exact search stays pure Python. Rejected: requiring numpy in the core. | It is the reference; its cost is measured (linear) and approximate search exists behind the optional extra. |
 | 2026-09-27 | ONNX Runtime telemetry is disabled with `ORT_DISABLE_TELEMETRY=1` before import, plus `disable_telemetry_events()`. | Found while validating Phase 5: about 1 in 4 test runs aborted at exit inside the runtime's 1DS HTTP telemetry client (crash backtrace). It was hidden network traffic, contrary to Principle 9. With the opt-out: 0 aborts in 20 runs (previously 5 in 20). The per-event API alone did not stop it. |
+| 2026-09-27 | Hybrid retrieval is a new module (`hybrid`) beside the Phase 2 `Retriever`, which stays the run retriever. Rejected: extending `RetrieverSpec`/`RetrievalTrace`. | Their contract (every memory scored; total = gated weighted sum) cannot express candidate generation, hard filters or reranking, and changing it would change every Phase 2–5 digest. |
+| 2026-09-27 | Candidates come from a corpus of every version known at `known_at`, not the state at `valid_at`. | Exclusions (future, expired, superseded, forgotten) become recorded reasons instead of silent absences. |
+| 2026-09-27 | The semantic generator indexes the state at (`known_at`, `known_at`); semantic *features* are exact for every candidate. Rejected: indexing every version. | `IndexManifest` lists one version per memory (Phase 5); other versions still enter through the lexical and metadata generators. |
+| 2026-09-27 | Weights are positive and sum to 1; study policies use equal weights. Rejected: tuned weights. | An uninformed, stated baseline; learned or adaptive weights are Phase 13. |
+| 2026-09-27 | Missing signals are recorded with a reason, and each policy declares fail or omit. Rejected: treating missing as 0. | "No claim" and "claim says no" are different evidence. |
+| 2026-09-27 | Normalisation is declared per signal; degenerate pools map to documented rank-neutral constants. | Hidden normalisation was a stated quality-bar violation; the constants cannot reorder candidates. |
+| 2026-09-27 | Exposure runs after diversity. Rejected: exposure before diversity. | Counter-evidence is by construction similar to what it disputes, so MMR would suppress exactly what exposure exists to show. |
+| 2026-09-27 | Default exposure is `surface`. Rejected: `penalize` as default. | Measured: penalising demoted both sides of a same-instant contradiction and removed the disagreement from view (exposure 0/5). |
+| 2026-09-27 | MMR in penalty form; β = 1 (λ = 0.5) in the reference policy with a sweep over β. | The symmetric convention needs no tuning to state; the sweep measures what it costs (docs/experiments/phase6-hybrid.md). |
+| 2026-09-27 | Reciprocal rank fusion uses k = 60. | The constant of Cormack, Clarke & Büttcher (2009), not a tuned value. |
+| 2026-09-27 | Recency keeps the Phase 2 half-life (30 days) as the reference, swept over 7, 90 and 365 days. | No decay constant is justified a priori; the sweep reports its effect. |
+| 2026-09-27 | Source priors are declared per policy as benchmark metadata. Rejected: inferring reliability. | Source reliability as a variable is Phase 12; Phase 6 only uses recorded metadata. |
+| 2026-09-27 | Fact recall added beside recall. | Found while running Phase 6: the benchmark repeats facts on purpose, so plain recall rewards duplicates and penalises diversity by construction. |
+| 2026-09-27 | Leave one out against two references (`full` and diversity-free). | Found while running Phase 6: with diversity on, MMR dominated every other removal. |
+| 2026-09-27 | Benchmark targets are checked by recomputing the epistemic answer from the reports. | Found while validating Phase 6: two free-text restatements dated a day after a same-instant contradiction would have resolved it; they were re-dated before any reported run. |
+| 2026-09-27 | Hybrid policies are not yet a run-manifest variable. | Runs, manifests and `compare` are unchanged (I33). A manifest field for a retrieval policy belongs with the first run that needs one (Phases 13 and 18). |

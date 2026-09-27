@@ -28,6 +28,14 @@ from memoria.core import (
     Step,
     unit_interval,
 )
+from memoria.hybrid_eval import (
+    BenchmarkQuery,
+    CandidateFact,
+    HybridBenchmark,
+    Perturbation,
+    Role,
+)
+from memoria.hybrid_eval import Judgement as HybridJudgement
 from memoria.retrieval import EXTRACTIVE, lexical_recency
 from memoria.semantic_eval import Judgement, Relevance, SemanticBenchmark, SemanticQuery
 
@@ -375,4 +383,326 @@ def semantic_diagnostic() -> tuple[Dataset, SemanticBenchmark]:
     dataset = Dataset(name="semantic-diagnostic", version="1", steps=tuple(steps))
     return dataset, SemanticBenchmark(
         name="semantic-diagnostic", version="1", dataset=dataset.digest, queries=tuple(queries)
+    )
+
+
+# --- Phase 6 hybrid-retrieval benchmark ------------------------------------------------------
+
+# (candidate id = experience source, day it occurred, text, fact it expresses or None).
+# Ids are "<class>:<id>" except "import-a81", whose source carries no structured class.
+_HYBRID_CANDIDATES: tuple[tuple[str, int, str, str | None], ...] = (
+    # Ana: a move, a later move, duplicates, a wrong attribute, a wrong entity.
+    ("chat:a0", 0, "set ana.home = Paris", "ana.home=paris"),
+    ("chat:a2", 2, "Ana lives in Paris, near the Canal Saint-Martin.", "ana.home=paris"),
+    ("chat:a55", 55, "set ana.home = Berlin", "ana.home=berlin"),
+    ("email:a56", 56, "Ana lives in Berlin now.", "ana.home=berlin"),
+    ("email:a57", 57, "Home for Ana is the German capital these days.", "ana.home=berlin"),
+    ("chat:b58", 58, "set ben.home = Berlin", "ben.home=berlin"),
+    ("chat:b59", 59, "Ben lives in Berlin now.", "ben.home=berlin"),
+    ("chat:a60", 60, "set ana.work_city = Paris", "ana.work_city=paris"),
+    ("chat:a61", 61, "Ana works in Paris three days a week.", "ana.work_city=paris"),
+    ("chat:a80", 80, "Ana lives in Berlin now.", "ana.home=berlin"),
+    ("import-a81", 81, "Ana lives in Berlin now.", "ana.home=berlin"),
+    ("chat:a120", 120, "Paris has excellent restaurants, Ana says.", None),
+    ("chat:a200", 200, "set ana.home = Munich", "ana.home=munich"),
+    ("chat:a201", 201, "Ana lives in Munich now.", "ana.home=munich"),
+    ("chat:a299", 299, "Ana bought a new bicycle yesterday.", None),
+    # Leo: two sources disagree about the same instant.
+    ("clinic:m10", 10, "set leo.dose = 20 mg", "leo.dose=20 mg"),
+    ("forum:m10", 10, "set leo.dose = 40 mg", "leo.dose=40 mg"),
+    ("clinic:m11", 10, "Leo takes 20 mg of lisinopril each morning.", "leo.dose=20 mg"),
+    ("clinic:m12", 12, "set mia.dose = 20 mg", "mia.dose=20 mg"),
+    ("forum:m40", 40, "Lisinopril can cause a dry cough.", None),
+    # Kim: a same-instant contradiction between near-identical statements.
+    ("chat:f20", 20, "set kim.flight = 14 March", "kim.flight=14 march"),
+    ("email:f20", 20, "set kim.flight = 21 March", "kim.flight=21 march"),
+    ("chat:f21", 20, "Kim's flight to Tokyo departs on 14 March.", "kim.flight=14 march"),
+    ("chat:f22", 22, "Kim's flight to Seoul departs on 14 March.", None),
+    # Team meeting: a retroactive correction.
+    ("chat:t20", 20, "set team.meeting = Thursday 3 pm", "team.meeting=thursday 3 pm"),
+    ("chat:t21", 21, "The team meeting starts at 3 pm on Thursday.", "team.meeting=thursday 3 pm"),
+    ("email:t30", 30, "correct team.meeting = Thursday 4 pm", "team.meeting=thursday 4 pm"),
+    (
+        "email:t31",
+        31,
+        "Correction: the team meeting is at 4 pm on Thursday.",
+        "team.meeting=thursday 4 pm",
+    ),
+    # Sam: a fact, a same-value fact about another attribute, then a forget.
+    ("chat:d5", 5, "set sam.dog = Biscuit", "sam.dog=biscuit"),
+    ("chat:d6", 6, "Sam's dog is called Biscuit.", "sam.dog=biscuit"),
+    ("chat:d7", 7, "set sam.cat = Biscuit", "sam.cat=biscuit"),
+    ("chat:d90", 90, "forget sam.dog", None),
+    # Noah: one fact stated five ways, and distractors.
+    ("clinic:n15", 15, "set noah.allergy = peanuts", "noah.allergy=peanuts"),
+    ("chat:n16", 16, "Noah is allergic to peanuts.", "noah.allergy=peanuts"),
+    ("email:n17", 17, "Noah is allergic to peanuts.", "noah.allergy=peanuts"),
+    ("chat:n18", 18, "Noah has a peanut allergy.", "noah.allergy=peanuts"),
+    ("chat:n19", 19, "Peanuts make Noah's throat swell up.", "noah.allergy=peanuts"),
+    ("chat:n20", 20, "Noah's sister is allergic to shellfish.", None),
+    ("chat:n25", 25, "Noah sells peanuts at the market.", None),
+    # Priya: a job change, a colleague, a recent unrelated note.
+    ("email:p30", 30, "set priya.employer = Globex", "priya.employer=globex"),
+    ("chat:p31", 31, "Priya works at Globex as a data engineer.", "priya.employer=globex"),
+    ("email:p150", 150, "set priya.employer = Acme", "priya.employer=acme"),
+    ("chat:p151", 151, "Priya works at Acme as a data engineer.", "priya.employer=acme"),
+    ("chat:p152", 152, "Omar works at Acme as a data engineer.", "omar.employer=acme"),
+    ("chat:p298", 298, "Priya had lunch with the Acme team today.", None),
+)
+
+HYBRID_CASES = (
+    "temporally_wrong",  # lexically (near-)identical to the target but not valid yet
+    "contradictory_similar",  # semantically similar, contradictory value
+    "recent_irrelevant",  # recent, shares the entity, answers nothing
+    "old_but_exact",  # old memory that exactly answers a historical query
+    "redundant_cluster",  # the answer stated several times
+    "wrong_entity",  # high similarity, another entity
+    "wrong_attribute",  # high lexical overlap, another attribute of the entity
+    "paraphrase_low_overlap",  # the answer with little shared wording
+    "superseded",  # an older value a later claim replaced
+    "source_conflict",  # sources of different declared reliability disagree
+    "retroactive_correction",  # a correction that applies before it occurred
+    "retracted",  # a fact that was later forgotten
+)
+
+# (role, candidates, cases the candidates are the focus of)
+_Roles = tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...]
+
+
+def _judge(roles: _Roles) -> tuple[HybridJudgement, ...]:
+    return tuple(
+        HybridJudgement(candidate=c, role=Role(role), cases=cases)
+        for role, candidates, cases in roles
+        for c in candidates
+    )
+
+
+_ANA_NOW: _Roles = (
+    ("target", ("chat:a55", "email:a56", "chat:a80", "import-a81"), ()),
+    ("target", ("email:a57",), ("paraphrase_low_overlap",)),
+    ("related", ("chat:a0", "chat:a2"), ("superseded",)),
+    ("trap", ("chat:a200", "chat:a201"), ("temporally_wrong",)),
+    ("trap", ("chat:b58", "chat:b59"), ("wrong_entity",)),
+    ("trap", ("chat:a60", "chat:a61"), ("wrong_attribute",)),
+    ("trap", ("chat:a299",), ("recent_irrelevant",)),
+    ("trap", ("chat:a120",), ()),
+)
+_NOAH: _Roles = (
+    ("target", ("clinic:n15", "chat:n16", "email:n17", "chat:n18"), ()),
+    ("target", ("chat:n19",), ("paraphrase_low_overlap",)),
+    ("trap", ("chat:n20", "chat:n25"), ()),
+)
+_LEO: _Roles = (
+    ("target", ("clinic:m10", "forum:m10"), ("source_conflict", "contradictory_similar")),
+    ("target", ("clinic:m11",), ()),
+    ("trap", ("clinic:m12",), ("wrong_entity",)),
+    ("trap", ("forum:m40",), ()),
+)
+_KIM: _Roles = (
+    ("target", ("chat:f20", "email:f20"), ("contradictory_similar",)),
+    ("target", ("chat:f21",), ()),
+    ("trap", ("chat:f22",), ("wrong_entity",)),
+)
+_PRIYA_NOW: _Roles = (
+    ("target", ("email:p150", "chat:p151"), ()),
+    ("related", ("email:p30", "chat:p31"), ("superseded",)),
+    ("trap", ("chat:p152",), ("wrong_entity",)),
+    ("trap", ("chat:p298",), ("recent_irrelevant",)),
+)
+
+# (id, text, valid day, key, roles, query-level cases)
+_HYBRID_QUERIES: tuple[tuple[str, str, int, str, _Roles, tuple[str, ...]], ...] = (
+    ("ana-home-now", "Where does Ana live?", 100, "ana.home", _ANA_NOW, ("redundant_cluster",)),
+    (
+        "ana-home-history",
+        "Where did Ana live at the start of the year?",
+        30,
+        "ana.home",
+        (
+            ("target", ("chat:a0", "chat:a2"), ("old_but_exact",)),
+            ("trap", ("email:a56", "chat:a80"), ("temporally_wrong",)),
+            ("trap", ("chat:a299",), ("recent_irrelevant",)),
+        ),
+        (),
+    ),
+    (
+        "ana-home-later",
+        "Where does Ana live?",
+        250,
+        "ana.home",
+        (
+            ("target", ("chat:a200", "chat:a201"), ()),
+            (
+                "related",
+                ("chat:a55", "email:a56", "email:a57", "chat:a80", "import-a81"),
+                ("superseded",),
+            ),
+            ("related", ("chat:a0", "chat:a2"), ()),
+            ("trap", ("chat:a299",), ("recent_irrelevant",)),
+            ("trap", ("chat:b59",), ("wrong_entity",)),
+        ),
+        (),
+    ),
+    ("leo-dose", "How much lisinopril does Leo take?", 100, "leo.dose", _LEO, ()),
+    ("kim-flight", "When does Kim fly to Tokyo?", 100, "kim.flight", _KIM, ()),
+    (
+        "team-meeting",
+        "When is the team meeting?",
+        100,
+        "team.meeting",
+        (
+            ("target", ("email:t30", "email:t31"), ()),
+            ("related", ("chat:t20", "chat:t21"), ("superseded",)),
+        ),
+        (),
+    ),
+    (
+        "team-meeting-history",
+        "When was the team meeting in January?",
+        25,
+        "team.meeting",
+        (
+            ("target", ("email:t30", "email:t31"), ("retroactive_correction",)),
+            ("related", ("chat:t20", "chat:t21"), ()),
+        ),
+        (),
+    ),
+    (
+        "sam-dog-before",
+        "What is Sam's dog called?",
+        50,
+        "sam.dog",
+        (
+            ("target", ("chat:d5", "chat:d6"), ()),
+            ("trap", ("chat:d7",), ("wrong_attribute",)),
+        ),
+        (),
+    ),
+    (
+        "sam-dog-after",
+        "What is Sam's dog called?",
+        150,
+        "sam.dog",
+        (
+            ("related", ("chat:d5", "chat:d6"), ("retracted",)),
+            ("related", ("chat:d90",), ()),
+            ("trap", ("chat:d7",), ("wrong_attribute",)),
+        ),
+        (),
+    ),
+    ("noah-allergy", "What is Noah allergic to?", 100, "noah.allergy", _NOAH,
+     ("redundant_cluster",)),
+    ("noah-reworded", "Which food gives Noah a reaction?", 100, "noah.allergy", _NOAH,
+     ("paraphrase_low_overlap",)),
+    ("priya-now", "Where does Priya work?", 299, "priya.employer", _PRIYA_NOW, ()),
+    (
+        "priya-history",
+        "Where did Priya work in the spring?",
+        100,
+        "priya.employer",
+        (
+            ("target", ("email:p30", "chat:p31"), ("old_but_exact",)),
+            ("trap", ("email:p150", "chat:p151"), ("temporally_wrong",)),
+            ("trap", ("chat:p298",), ("recent_irrelevant",)),
+        ),
+        (),
+    ),
+)  # fmt: skip
+
+# (base, perturbation, text, valid day or None (base's), key or None (base's),
+#  roles or None (base's))
+_HYBRID_VARIANTS: tuple[tuple[str, str, str, int | None, str | None, _Roles | None], ...] = (
+    ("ana-home-now", "paraphrase", "What city is Ana's home?", None, None, None),
+    ("ana-home-now", "reorder", "Ana lives where?", None, None, None),
+    ("ana-home-now", "irrelevant_wording",
+     "Quick question before lunch: where does Ana live?", None, None, None),
+    ("ana-home-now", "entity", "Where does Ben live?", None, "ben.home",
+     (("target", ("chat:b58", "chat:b59"), ()),)),
+    ("ana-home-now", "attribute", "Which city does Ana work in?", None, "ana.work_city",
+     (("target", ("chat:a60", "chat:a61"), ()),)),
+    ("ana-home-now", "time", "Where does Ana live?", 30, None,
+     (("target", ("chat:a0", "chat:a2"), ()),)),
+    ("ana-home-now", "negation", "Where does Ana not live?", None, None, ()),
+    ("noah-allergy", "reorder", "Noah is allergic to what?", None, None, None),
+    ("noah-allergy", "irrelevant_wording",
+     "Sorry to bother you, but what is Noah allergic to?", None, None, None),
+    ("noah-allergy", "negation", "What is Noah not allergic to?", None, None, ()),
+    ("noah-allergy", "entity", "What is Ben allergic to?", None, "ben.allergy", ()),
+    ("priya-now", "paraphrase", "Who employs Priya?", None, None, None),
+    ("priya-now", "irrelevant_wording", "By the way, where does Priya work these days?",
+     None, None, None),
+    ("priya-now", "entity", "Where does Omar work?", None, "omar.employer",
+     (("target", ("chat:p152",), ()),)),
+    ("priya-now", "time", "Where does Priya work?", 100, None,
+     (("target", ("email:p30", "chat:p31"), ()),)),
+    ("leo-dose", "numeric", "Does Leo take 40 mg of lisinopril?", None, None, None),
+    ("leo-dose", "reorder", "Leo takes how much lisinopril?", None, None, None),
+    ("kim-flight", "numeric", "Does Kim fly to Tokyo on 21 March?", None, None, None),
+    ("kim-flight", "paraphrase", "What date is Kim's trip to Japan?", None, None, None),
+    ("team-meeting", "reorder", "The team meeting is when?", None, None, None),
+)  # fmt: skip
+
+HYBRID_KNOWN_AT = 300
+
+
+def hybrid_benchmark() -> tuple[Dataset, HybridBenchmark]:
+    """The Phase 6 controlled benchmark for hybrid retrieval (not the Phase 15 benchmark).
+
+    45 experiences about seven subjects, ingested as they occur and stored verbatim
+    (episodic), mixing statement-language facts (which carry structured claims) with
+    free-text notes (which do not). 13 primary queries pin (valid_at, known_at = day 300)
+    and a claim key; each judged candidate has a designed role — target (answers at
+    valid_at by the Phase 3 epistemic standard: latest occurrence holds, same-instant
+    disagreement is contested so both values are targets, corrections are retroactive,
+    a forget leaves no target), related (same subject and attribute, not the answer) or
+    trap — and may be the focus of an adversarial case. 20 variants perturb primary
+    queries (paraphrase, reordering, irrelevant wording; entity, attribute, time,
+    negation, number). Roles are the design, fixed before any measurement.
+    """
+    steps = sorted(
+        (_step(d, text, cid) for cid, d, text, _ in _HYBRID_CANDIDATES),
+        key=lambda s: (s.recorded_at, s.experience.source),
+    )
+    dataset = Dataset(name="hybrid-benchmark", version="1", steps=tuple(steps))
+    known = day(HYBRID_KNOWN_AT)
+    queries = [
+        BenchmarkQuery(
+            id=qid,
+            text=text,
+            valid_at=day(valid),
+            known_at=known,
+            key=key,
+            judgements=_judge(roles),
+            cases=cases,
+        )
+        for qid, text, valid, key, roles, cases in _HYBRID_QUERIES
+    ]
+    primary = {q.id: q for q in queries}
+    for base, perturbation, text, valid, key, roles in _HYBRID_VARIANTS:
+        b = primary[base]
+        queries.append(
+            BenchmarkQuery(
+                id=f"{base}~{perturbation}",
+                text=text,
+                valid_at=b.valid_at if valid is None else day(valid),
+                known_at=known,
+                key=b.key if key is None else key,
+                judgements=tuple(j.model_copy(update={"cases": ()}) for j in b.judgements)
+                if roles is None
+                else _judge(roles),
+                base=base,
+                perturbation=Perturbation(perturbation),
+            )
+        )
+    return dataset, HybridBenchmark(
+        name="hybrid-benchmark",
+        version="1",
+        dataset=dataset.digest,
+        queries=tuple(queries),
+        facts=tuple(
+            CandidateFact(candidate=cid, fact=fact)
+            for cid, _, _, fact in _HYBRID_CANDIDATES
+            if fact is not None
+        ),
+        cases=HYBRID_CASES,
     )
