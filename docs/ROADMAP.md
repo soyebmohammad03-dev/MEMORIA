@@ -14,7 +14,12 @@ Phases 1–4 are complete and form the **substrate**: bitemporal append-only his
 interventions (3), and evaluation with a failure taxonomy and paired statistics (4).
 Phases 5–22 build on it without weakening any invariant. Phases 5 (semantic memory), 6
 (hybrid, explainable retrieval), 7 (consolidation, abstraction, hierarchy) and 8–10 (memory
-graph, forgetting and interference, built as one super-phase) are complete.
+graph, forgetting and interference, built as one super-phase) and 11-12 (belief revision and
+calibrated uncertainty, one laboratory) are complete. **Super-Phase 5** (adaptive importance,
+retention dynamics, free-text claims and entity identity;
+[results](experiments/superphase5-adaptive-memory.md)) delivers the adaptive-importance and
+feedback part of Phase 13 and the retention curves of Phase 16 on generated worlds; what remains
+of those phases is listed in their sections.
 
 ---
 
@@ -246,6 +251,13 @@ graph, forgetting and interference, built as one super-phase) are complete.
 
 ## Phase 13 — Adaptive retrieval policies (L4)
 
+**Status: partly delivered by Super-Phase 5.** Delivered (`adaptive`, `retention`): access and
+feedback events in a leakage-safe ledger, an auditable, ablatable importance model, and
+retention schedules driven by it, studied against static baselines with paired statistics.
+Still open: adaptive *retrieval policies* inside the hybrid pipeline (signals reweighted by
+feedback, policy state as replayable snapshots), a manifest variable for them, and retrieval-
+induced strengthening measured on the Phase 6 corpus.
+
 - **Objective:** study retrieval policies whose behaviour changes with use.
 - **Capabilities:** retrieval-frequency effects, feedback-driven reweighting and
   retrieval-induced strengthening, each as a recorded state transition.
@@ -294,6 +306,13 @@ graph, forgetting and interference, built as one super-phase) are complete.
 - **Deferred:** natural-language rendering beyond templates.
 
 ## Phase 16 — Large-scale longitudinal evaluation (L15)
+
+**Status: partly delivered by Super-Phase 5.** Delivered: retention, stale-answer, evidence
+retention and revision-latency curves with intervals, paired comparisons and onset detection on
+five generated worlds (`retention`, `adaptive_study`). Still open: the same curves on Phase 15
+benchmarks, incremental state reconstruction (the lab recomputes decisions per probe),
+contamination and interference curves, cluster-aware statistics beyond replicate-level pairing,
+and capacity.
 
 - **Objective:** measurements over time rather than at single points.
 - **Capabilities:** retention, forgetting, interference and contamination curves; error

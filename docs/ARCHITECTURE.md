@@ -185,6 +185,14 @@ These are enforced in code and tests, not by convention.
 | I74 | Calibration is fitted on calibration replicates (seed family 2) and evaluated on test replicates (seed family 1); hidden truth and hidden source reliability are used only for analysis. Log loss is refused unless the score is declared probabilistic. |
 | I75 | Abstention is a recorded decision with its inputs; errors prevented and answers lost are both counted. Risk–coverage curves handle ties in expectation. |
 | I76 | A belief trace either reaches the original experience through every link (answer, belief, events, contribution arithmetic, evidence, source, claim, memory versions, consolidation, graph edges) or lists exactly which link is missing. |
+| I77 | Importance is descriptive, never evidence: it is a weighted sum of components computed from recorded access and feedback events and declared source priors, and it is never an input to truth, confidence or correctness. Every `ImportanceRecord` lists its components' raw inputs, the ids of the events it used, its spec digest and its cutoff, and `verify_importance` re-derives it. |
+| I78 | A decision sees only events recorded strictly before it, and freezes the past: after a decision at time *t* the ledger refuses any event recorded before *t* (`LeakageError`). Feedback carries when it happened and when it was recorded, and late-recorded feedback is invisible until recorded. |
+| I79 | Ground-truth evaluation is not feedback: an event with origin `evaluation` is refused (`CircularEvidenceError`). Feedback comes from the environment (a simulated user with declared noise, independent of correctness for relevance confirmations) or from observation (no correction within a window), never from the instrument that scores the answers. |
+| I80 | Retention is availability decided at time *t* from history before *t* by a recorded schedule; nothing is deleted. Every item stays in the store and its record; a `RetentionDecision` records the schedule digest, the state, a closed-vocabulary reason, the cutoff, and the importance record or events it used. An archived item may be retrievable again if a later decision says so. |
+| I81 | A free-text claim is `extracted` only when exactly one rule matches its sentence, the sentence is not hedged, the subject is a name (not a pronoun) that resolves to exactly one registered entity and the attribute is known; anything else claim-like is an `unresolved` claim with a closed reason. It keeps the original text digest, the experience, the sentence and (extracted) subject and value spans, and exposes no usable entity, attribute or value. Its `confidence` is a declared rule prior (I59, I73). |
+| I82 | Identity outcomes are `resolved`, `ambiguous`, `candidates` or `unknown`; only an exact canonical name or a unique alias resolves, and a shared name is ambiguous, never resolved by picking one. Similarity yields candidates unless the measured baseline policy `similarity` is chosen. Identity assertions merge entities only with independent roots and no declared distinction; a false merge is detectable against a truth partition (I60). |
+| I83 | The instrument does not change the system: audit probes create no access or feedback events. Longitudinal measures are separate — retrieval retention, evidence retention, stale-answer rate, revision latency and no-answer rate are never combined into one score. |
+| I84 | Effects in the adaptive study are inferred over independent replicates by paired differences with a Student-t interval, an exact sign test, Holm within a world x metric family and an underpowered flag; an onset of damage is the earliest checkpoint or dose on the declared grid at which the adjusted test is significant in the harmful direction, and is a property of the tested design. |
 
 Tooling standard: Python ≥3.12, Pydantic v2, `mypy --strict`, Ruff, pytest with warnings
 as errors, `uv` with a committed lockfile, CI on every push.
@@ -238,6 +246,11 @@ as errors, `uv` with a committed lockfile, CI on every push.
 | **Availability** | active, suppressed (retrievable, penalised), archived, excluded, forgotten (not retrievable). History is unchanged in every state. | `hybrid.py` |
 | **Interference scenario** | One target fact, one probe and a labelled, nested sequence of distractors of one mechanism; observations and load curves against its load-0 baseline. | `interference.py` |
 | **Memory lab** | The Phase 8–10 world matrix, structure, interference and interaction studies and the demonstration. | `memory_lab.py` |
+| **Event / ledger** | An access (`used`) or feedback (`retrieval_success`, `user_confirmed_relevance`, `correction`, `contradiction_discovered`) on one item, with when it happened, when it was recorded, its origin and cause; the append-only, freeze-on-decision store of them. | `adaptive.py` |
+| **Importance record** | One item's importance at one time: components with raw inputs and event ids, weights, cutoff. Descriptive, never truth. | `adaptive.py` |
+| **Retention schedule / decision** | A recorded availability rule (keep-all, age window, importance gate, stale-aware gate) and one decision with reason, cutoff and basis. | `retention.py` |
+| **Claim (free text)** | A claim-like sentence, extracted or unresolved, with text digest, spans and lineage. | `claims.py` |
+| **Identity outcome** | resolved, ambiguous, candidates or unknown for a mention against a registry. | `identity.py` |
 | **Autopsy** | The provenance DAG from a response back through retrieval → versions → operations → experiences, at a point in both time axes. | Phase 17 (traversal: `graph.trace_provenance`) |
 
 The `update`/`correct` distinction is deliberate: it separates *temporal change* from
@@ -1055,6 +1068,61 @@ are applied to the evidence and compared to raw with a "more confident, not more
 correct" flag. Belief answers are compared to Phase 7 hybrid top-1 retrieval on the same
 probes. Observational comparisons are described, never claimed as causal.
 
+### 4.18 Adaptive memory, retention dynamics and free-text claims (Super-Phase 5)
+
+Super-Phase 5 is a self-contained laboratory (it adds modules and changes no manifest, schema
+or stored digest) that studies how importance, retention and revision behave when they are
+driven by observed use. It covers the adaptive-importance and feedback part of Phase 13, the
+retention curves of Phase 16 (on generated worlds, not yet on Phase 15 benchmarks), and the
+free-text claims and entity resolution deferred from Phases 6-8.
+
+**Events and importance.** Access events (`used`: an item supported an answer) and feedback
+events (`retrieval_success`: no correction within the window; `user_confirmed_relevance`;
+`correction`; `contradiction_discovered`) live in an `EventLedger`. Each records when it
+happened and when it was recorded; a decision at *t* sees events recorded strictly before *t*
+and freezes the past (I78); ground-truth evaluation is refused (I79). Importance is a
+weighted sum of six components in [0, 1] — frequency, success (Beta-smoothed share of matured
+uses followed by success feedback), contradiction exposure, correction (1 / (1 + n)), recency
+(half-life since last use) and provenance (declared source prior) — with declared, untuned
+weights. Each `ImportanceRecord` lists raw inputs and event ids per component and is re-derived
+by `verify_importance` (I77). `ablate` removes one component and renormalises. A static
+baseline uses only `age` and `provenance` and reads no events.
+
+**Retention.** Schedules decide availability at each probe time (I80): `keep_all`,
+`age_window`, `gate` (kept during a grace period, then iff importance >= theta; no exemption)
+and `gate_stale_aware` (never archives a key's newest item; archives items a source
+retracted, or a later different value superseded; "newer" is not "truer", so a stale-value
+flood defeats it). The answer is the available item maximising `(1 - lambda) * freshness +
+lambda * importance` (lambda = 0: the latest occurrence wins).
+
+**Loop and instrument.** A user query is answered from available items; the cited item gets a
+`used` event; a simulated user (environment: notices wrong answers with a declared
+probability, false-alarms with another, confirms relevance independently of correctness)
+reacts a day later, possibly recorded later still; `retrieval_success` is emitted after the
+success window if no correction arrived. Audit probes ask each key's value every ten days and
+create no events (I83).
+
+**Claims and identity.** `claims.extract` applies a fixed table of rules to sentences (I81);
+`identity.resolve_mention` resolves subject names against a registry (I82). Designed cases
+fix the behaviour on hand-written text; the study measures precision, recall, uncertain text
+converted to fact, unresolved reasons, span-verified lineage and, for three identity policies
+on the same mentions, false merges.
+
+**Study.** Five generated worlds (stable, changing, repetitive, noisy, adversarial) x
+declared systems x independent replicates, with paired comparisons over replicates, Holm within
+a family, onset over checkpoints and doses, importance ablations, importance calibration
+(fitted on calibration replicates, evaluated on test replicates; both *use* and *truth* are
+measured, kept apart), a trace audit that re-derives every decision and importance record,
+deterministic cost counters (wall times are a separate `PerformanceRecord`), and a
+reproduction check that re-simulates replicates into an independent store (I84).
+
+Known limits: worlds, declared weights, thresholds and doses are generated or declared, not
+tuned or real; the simulated user is a model; the extractor is a small rule table and free text
+comes from templates; decisions are recomputed per probe rather than maintained
+incrementally; the study does not use the run manifest (it is a lab like Phases 8-10 and
+11-12); probes of one key are correlated (pooled Wilson intervals are shown, inference uses
+replicates).
+
 ## 5. Module Boundaries
 
 The dependency rule is strict: **dependencies point inward toward `core`**. `core` imports
@@ -1096,6 +1164,12 @@ revision      evidence ledger, events, replay, reconstruction, violations, selec
 calibration   reliability, Brier, isotonic, risk-coverage, abstention quality, subgroups  (exists)
 belief_worlds, belief_lab, belief_cases, belief_study, belief_ops, belief_demo,
 belief_run, belief_report   Phase 11-12 generated worlds, studies, cases, run and report  (exists)
+identity      conservative entity identity for text: registry, outcomes, merge assertions  (exists)
+claims        conservative free-text claim extraction; unresolved claims as objects  (exists)
+adaptive      access and feedback events, leakage-safe ledger, auditable importance, ablation  (exists)
+retention     retention schedules, feedback loop, longitudinal simulator, audit probes  (exists)
+adaptive_worlds, adaptive_cases, adaptive_study, adaptive_report, adaptive_run
+              Super-Phase 5 generated worlds, designed cases, study, report and run  (exists)
 autopsy       Phase 17: autopsy records over graph.trace_provenance
 api           FastAPI surface over the above (no logic of its own)
 observatory   interactive visualisation (consumes api only)
@@ -1113,7 +1187,7 @@ sources, and every experiment reproduces from its manifest.
 | L1 Memory core | Typed memories: episodic and semantic memories, temporal facts, entities, relations, sources, confidence, validity, lineage, consolidation state, supersession, contradiction and abstraction relationships — as explicit types, not a universal object | `core` versions and history | 1 ✓, extended 7, 8, 11, 12 |
 | L2 Formation | Pluggable policies (verbatim, keyed, abstraction, entity-centric, relation extraction, summarisation, hybrid); experience → decision → memory → evidence | `formation` | 2 ✓, extended 7 |
 | L3 Consolidation | candidate → validation → deduplication → merging → abstraction → durable memory, with lineage to every supporting experience | L1, L2, L5 | 7 ✓ |
-| L4 Hybrid retrieval | Decomposed signals (lexical, semantic, temporal, recency, reliability, confidence, provenance, contradiction, diversity), rerankers, adaptive policies | `retrieval` signals and traces | 2 ✓, 6 ✓, 13 |
+| L4 Hybrid retrieval | Decomposed signals (lexical, semantic, temporal, recency, reliability, confidence, provenance, contradiction, diversity), rerankers, adaptive policies | `retrieval` signals and traces | 2 ✓, 6 ✓, 13 (importance and feedback in Super-Phase 5) |
 | L5 Semantic memory | Local embedders and indexes as artifacts | `artifacts`, `core` states | 5 ✓ |
 | L6 Memory graph | Provenance and semantic graph with snapshots | all records | 8 ✓ |
 | L7 Forgetting lab | Forgetting mechanisms as policies and interventions; nothing deleted | history, interventions | 9 ✓ |
@@ -1226,10 +1300,10 @@ deferrals — is in [ROADMAP.md](ROADMAP.md).
 | 10 ✓ | Interference laboratory | Each generator parameter measurably moves its target property |
 | 11 ✓ | Contradiction and belief revision | Revision measured without equating newer with truer; collateral damage measured |
 | 12 ✓ | Source reliability and uncertainty | Separate, calibrated confidence components; no universal score |
-| 13 | Adaptive retrieval policies | Every adaptation a replayable event |
+| 13 (part) | Adaptive retrieval policies | Every adaptation a replayable event; Super-Phase 5 delivers adaptive importance, feedback events and retention, not adaptive policies inside hybrid retrieval |
 | 14 | Memory contamination and adversarial experiments | Every attack-caused failure traces to an injected experience |
 | 15 | Long-horizon benchmark generation | Datasets reproducible from parameters with measured difficulty |
-| 16 | Large-scale longitudinal evaluation | Curves decomposable to per-probe observations |
+| 16 (part) | Large-scale longitudinal evaluation | Curves decomposable to per-probe observations; Super-Phase 5 delivers retention and stale-answer curves on generated worlds |
 | 17 | Memory autopsy | Every autopsy link resolves to a verified artifact |
 | 18 | Experiment orchestration and parameter sweeps | Sweeps reproduce; resumption equals uninterrupted runs |
 | 19 | Advanced statistical and research analysis | Methods reproduce reference values; coverage checked |
@@ -1341,3 +1415,15 @@ deferrals — is in [ROADMAP.md](ROADMAP.md).
 | 2026-09-29 | Change is separated from contradiction by a declared concurrency window, not by recency. Rejected: "latest report wins". | Recency is not truth (I71); the window is varied in the study. |
 | 2026-09-29 | Calibrators are fitted on separate replicates and decisions keep the raw score. Rejected: fitting and evaluating on the same runs. | Recalibration evaluated on its own fit data is trivially perfect. |
 | 2026-09-29 | Source trust is a declared prior; learned trust is labelled circular. Rejected: inferring reliability from agreement and presenting it as ground truth. | Agreement with the majority rewards copying (I72). |
+| 2026-09-30 | Super-Phase 5 (adaptive importance, retention dynamics, free-text claims, identity) is a laboratory of new modules with no manifest, schema or digest change. Rejected: a manifest variable for adaptive memory now. | Like Phases 8-10 and 11-12 it is not yet a run-manifest variable; every stored digest is untouched (no existing source file changed). |
+| 2026-09-30 | Importance is descriptive: six components from events and declared source priors, declared untuned weights, ablation by removal and renormalisation (I77). Rejected: learned weights; using answer correctness as a component. | A learned target would be either truth (circular) or future use (then "calibrated" against itself); a component's contribution is measured by removing it. |
+| 2026-09-30 | Events carry occurrence and record times; a decision sees events recorded strictly before it and freezes the past (I78). Rejected: filtering by occurrence time alone. | Feedback is recorded late; filtering by when it happened would let a decision use what was learned afterwards. |
+| 2026-09-30 | Ground-truth evaluation is refused as feedback; the simulated user is the environment, and relevance confirmations are independent of correctness (I79). Rejected: "the answer was correct" as a success event. | Correctness as feedback makes the memory learn from its own scorer. |
+| 2026-09-30 | Retention is recomputed at each probe from history before it, with an explicit exemption only in the stale-aware schedule (I80). Rejected: sticky archival; a global newest-item exemption. | Sticky decisions depend on the schedule's own past and hide recoveries; an exemption in every schedule would remove the harm being measured. |
+| 2026-09-30 | Answers rank by `(1 - lambda) * freshness + lambda * importance`; lambda is a dose. Found while piloting: importance-only ranking (lambda = 1) answered from the most used old value (stale rate 0.88 in the changing world), which says only that a usage score ignores time. | A dose shows where usage feedback starts to hurt instead of reporting one extreme. |
+| 2026-09-30 | The importance threshold sweep starts at 0.45 and is compared with keep-all under the same ranking. Found while piloting: at 0.4 the gate archived nothing (an unused, recorded item scores about 0.42 on the declared scale), and a `latest` ranking cannot be hurt by archiving old items. | Only the schedule may differ between the compared runs (I27). |
+| 2026-09-30 | The static importance baseline uses `age` and `provenance`. Found by a unit test: `recency` reads use events, so a baseline built on it was not event-free. | The point of the baseline is to read no events. |
+| 2026-09-30 | Claim extraction is a fixed rule table; hedged, pronoun-subject, ambiguous, near-collision, unknown or multiply-matched sentences become unresolved claims (I81). Rejected: a language model or NLI judge; extracting the best guess. | No pinned local model is in scope (Principles 7, 8); an unresolved claim is a measured non-answer, a wrong fact is not. |
+| 2026-09-30 | Identity: similarity produces candidates, a shared alias is ambiguous, merge assertions need independent roots and no declared distinction (I82). The `similarity` policy exists only as a measured baseline. Rejected: highest-similarity-wins as the default. | False merges must be measurable, and a false merge is silent by construction. |
+| 2026-09-30 | Inference is over independent replicates (paired, t interval, sign test, Holm per world and metric); pooled Wilson intervals are shown beside it (I84). Rejected: probe-level McNemar as the primary test. | Probes of one key are correlated; the independent unit here is the seeded world. |
+| 2026-09-30 | Reproduction re-simulates the first and last replicates into an independent store; the test suite compares whole-study digests of two executions. Rejected: re-running the full study inside the run. | The check is exact on the runs it covers and its cost is bounded. |
