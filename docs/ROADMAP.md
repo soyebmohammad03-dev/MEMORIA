@@ -15,7 +15,8 @@ interventions (3), and evaluation with a failure taxonomy and paired statistics 
 Phases 5–22 build on it without weakening any invariant. Phases 5 (semantic memory), 6
 (hybrid, explainable retrieval), 7 (consolidation, abstraction, hierarchy) and 8–10 (memory
 graph, forgetting and interference, built as one super-phase) and 11-12 (belief revision and
-calibrated uncertainty, one laboratory) are complete. **Super-Phase 5** (adaptive importance,
+calibrated uncertainty, one laboratory) are complete. **Super-Phase 6** (autopsy, replay, counterfactuals and the multi-seed benchmark;
+[results](experiments/superphase6-autopsy-replay-benchmark.md)) builds on it. **Super-Phase 5** (adaptive importance,
 retention dynamics, free-text claims and entity identity;
 [results](experiments/superphase5-adaptive-memory.md)) delivers the adaptive-importance and
 feedback part of Phase 13 and the retention curves of Phase 16 on generated worlds; what remains
@@ -329,6 +330,13 @@ and capacity.
 - **Deferred:** cross-study meta-analysis (19).
 
 ## Phase 17 — Memory autopsy (L14, flagship)
+
+**Status: partly delivered by Super-Phase 6** ([results](experiments/superphase6-autopsy-replay-benchmark.md)).
+Delivered (`autopsy`, `autopsy_demo`): an evidence-linked autopsy of memory answers and beliefs
+(found / missing / not applicable links, verified by rebuilding), deterministic replay of stored
+runs at a cutoff, fixed-evidence counterfactuals, and substrate replay. Still open: autopsy of
+Phase 2-7 hybrid retrieval traces and of every stored response of an experiment, links to
+interventions and experiments, and the API and observatory (Phase 20).
 
 - **Objective:** answer "why did MEMORIA produce this memory or answer?" as a stored,
   reproducible research object.

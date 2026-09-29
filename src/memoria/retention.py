@@ -200,6 +200,9 @@ class SimResult:
     latency: list[tuple[str, float, bool]] = field(default_factory=list)  # key, days, censored
     ledger: EventLedger | None = None
     catalog: dict[str, Item] = field(default_factory=dict)
+    query_log: list[tuple[int, float, str, str | None]] = field(
+        default_factory=list
+    )  # user queries
 
 
 def precompute_claims(
@@ -214,6 +217,90 @@ def _gold(r: Report) -> tuple[tuple[str, str, str, str] | None, str]:
     if not r.certain:
         return None, "uncertain"
     return (r.entity, r.attribute, r.value, r.kind), "gold"
+
+
+class Memory:
+    """The decision logic of a system over recorded items and a ledger.
+
+    Pure with respect to its inputs: ``available``, ``choose`` and ``ranked`` at time ``t`` read
+    items recorded at or before ``t`` and events recorded strictly before ``t`` (the ledger
+    freezes the past at ``t``). The simulator drives it live; replay drives it over a stored
+    ledger, so both make the same decisions from the same records.
+    """
+
+    def __init__(self, system: System, ledger: EventLedger) -> None:
+        self.system = system
+        self.ledger = ledger
+        self.by_key: dict[str, list[Item]] = defaultdict(list)
+        self.importance_evals = 0
+        self.scanned = 0
+
+    def imp(self, it: Item, t: float) -> float:
+        self.importance_evals += 1
+        return score(self.ledger, it.id, it.recorded, it.prior, t, self.system.importance)
+
+    def known(self, key: str, t: float) -> list[Item]:
+        return [i for i in self.by_key[key] if i.recorded <= t]
+
+    def newest(self, key: str, t: float) -> Item | None:
+        return max(self.known(key, t), key=lambda i: (i.occurred, i.recorded, i.id), default=None)
+
+    def decide(self, it: Item, t: float, top: Item | None) -> tuple[bool, Reason, tuple[str, ...]]:
+        sch = self.system.schedule
+        if sch.rule == "keep_all":
+            return True, "kept_all", ()
+        age = t - it.recorded
+        if sch.rule == "age_window":
+            return (
+                (True, "within_age", ()) if age <= sch.max_age_days else (False, "beyond_age", ())
+            )
+        if sch.rule == "gate_stale_aware":
+            if top is not None and it.id == top.id:
+                return True, "newest_exempt", ()
+            cor = [
+                e.id
+                for e in self.ledger.visible(it.id, t)
+                if e.kind == "correction" and e.origin == "source_claim"
+            ]
+            if cor:
+                return False, "source_corrected", tuple(sorted(cor))
+            sup = [
+                j.id
+                for j in self.by_key[it.key]
+                if j.recorded < t
+                and j.value != it.value
+                and j.occurred > it.occurred + CONCURRENCY_DAYS
+            ]
+            if sup:
+                return False, "superseded", tuple(sorted(sup))
+        if age <= sch.grace_days:
+            return True, "grace", ()
+        ok = self.imp(it, t) >= sch.min_importance
+        return ok, "importance_above" if ok else "importance_below", ()
+
+    def decisions(self, key: str, t: float) -> list[tuple[Item, bool, Reason, tuple[str, ...]]]:
+        """The availability decision of every item of ``key`` known at ``t``."""
+        items = self.known(key, t)
+        top = self.newest(key, t) if self.system.schedule.rule == "gate_stale_aware" else None
+        self.scanned += len(items)
+        return [(it, *self.decide(it, t, top)) for it in items]
+
+    def available(self, key: str, t: float) -> list[Item]:
+        return [it for it, ok, _, _ in self.decisions(key, t) if ok]
+
+    def rank_key(self, i: Item, t: float) -> tuple[float, float, str]:
+        """The ordering key of a candidate: rank score, then later occurrence, then id."""
+        lam = self.system.rank_weight
+        half = self.system.importance.half_life_days
+        fresh = 0.5 ** (max(0.0, t - i.occurred) / half)
+        return (quantize((1 - lam) * fresh + lam * self.imp(i, t)), i.occurred, i.id)
+
+    def choose(self, cands: list[Item], t: float) -> Item | None:
+        if not cands:
+            return None
+        if self.system.rank_weight == 0:
+            return max(cands, key=lambda i: (i.occurred, i.recorded, i.id))
+        return max(cands, key=lambda i: self.rank_key(i, t))
 
 
 def simulate(
@@ -235,7 +322,8 @@ def simulate(
     res = SimResult(ledger=ledger)
     index = truth_index(world)
     sch, spec = system.schedule, system.importance
-    by_key: dict[str, list[Item]] = defaultdict(list)
+    mem = Memory(system, ledger)
+    by_key = mem.by_key
     seen_claims: dict[str, Claim] = {}
     texts = {r.id: r.text for r in world.reports}
     corrected_used: set[str] = set()
@@ -264,53 +352,10 @@ def simulate(
             Event(kind=kind, item=item, at=at, recorded_at=recorded, origin=origin, cause=cause)
         )
 
-    def imp(it: Item, t: float) -> float:
-        res.importance_evals += 1
-        return score(ledger, it.id, it.recorded, it.prior, t, spec)
-
-    def newest(key: str, t: float) -> Item | None:
-        known = [i for i in by_key[key] if i.recorded <= t]
-        return max(known, key=lambda i: (i.occurred, i.recorded, i.id), default=None)
-
-    def decide(it: Item, t: float, top: Item | None) -> tuple[bool, Reason, tuple[str, ...]]:
-        if sch.rule == "keep_all":
-            return True, "kept_all", ()
-        age = t - it.recorded
-        if sch.rule == "age_window":
-            return (
-                (True, "within_age", ()) if age <= sch.max_age_days else (False, "beyond_age", ())
-            )
-        if sch.rule == "gate_stale_aware":
-            if top is not None and it.id == top.id:
-                return True, "newest_exempt", ()
-            cor = [
-                e.id
-                for e in ledger.visible(it.id, t)
-                if e.kind == "correction" and e.origin == "source_claim"
-            ]
-            if cor:
-                return False, "source_corrected", tuple(sorted(cor))
-            sup = [
-                j.id
-                for j in by_key[it.key]
-                if j.recorded < t
-                and j.value != it.value
-                and j.occurred > it.occurred + CONCURRENCY_DAYS
-            ]
-            if sup:
-                return False, "superseded", tuple(sorted(sup))
-        if age <= sch.grace_days:
-            return True, "grace", ()
-        ok = imp(it, t) >= sch.min_importance
-        return ok, "importance_above" if ok else "importance_below", ()
-
     def available(key: str, t: float, tr: bool = False) -> list[Item]:
-        items = [i for i in by_key[key] if i.recorded <= t]
-        top = newest(key, t) if sch.rule == "gate_stale_aware" else None
-        out = []
-        for it in items:
-            ok, reason, basis = decide(it, t, top)
-            if tr:
+        dec = mem.decisions(key, t)
+        if tr:
+            for it, ok, reason, basis in dec:
                 rec = (
                     compute(ledger, it.id, it.recorded, it.prior, t, spec)
                     if reason.startswith("importance")
@@ -330,23 +375,10 @@ def simulate(
                         basis=basis,
                     )
                 )
-            if ok:
-                out.append(it)
-        res.scanned += len(items)
-        return out
+        return [it for it, ok, _, _ in dec if ok]
 
     def choose(cands: list[Item], t: float) -> Item | None:
-        if not cands:
-            return None
-        lam = system.rank_weight
-        if lam == 0:
-            return max(cands, key=lambda i: (i.occurred, i.recorded, i.id))
-
-        def rank(i: Item) -> tuple[float, float, str]:
-            fresh = 0.5 ** (max(0.0, t - i.occurred) / spec.half_life_days)
-            return (quantize((1 - lam) * fresh + lam * imp(i, t)), i.occurred, i.id)
-
-        return max(cands, key=rank)
+        return mem.choose(cands, t)
 
     def lineage(it: Item) -> bool:
         if it.id not in lineage_memo:
@@ -462,6 +494,7 @@ def simulate(
             qi, q = task
             cands = available(q.key, t)
             it = choose(cands, t)
+            res.query_log.append((qi, t, q.key, it.id if it else None))
             truth, _ = truth_at(index, q.key, t)
             if it is None:
                 res.user_status["none"] += 1
@@ -488,6 +521,8 @@ def simulate(
         again = any(e.kind == "used" for e in ledger.after(item, t0, t0 + FUTURE_DAYS))
         res.calibration.append((sc, again, true_now))
     res.events = ledger.count
+    res.importance_evals = mem.importance_evals
+    res.scanned = mem.scanned
     _latency(world, res, index)
     return res
 

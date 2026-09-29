@@ -32,6 +32,7 @@ select = ["E", "W", "F", "I", "B", "UP", "N", "SIM", "RUF", "DTZ", "PT"]
 # Table rendering: one format string per table row.
 "src/memoria/belief_report.py" = ["E501"]
 "src/memoria/adaptive_report.py" = ["E501", "RUF001"]
+"src/memoria/benchmark_report.py" = ["E501", "RUF001"]
 
 [tool.mypy]
 strict = true

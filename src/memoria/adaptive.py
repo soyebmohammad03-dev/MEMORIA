@@ -130,6 +130,15 @@ class EventLedger:
         hi = bisect.bisect_left(rows, until, key=lambda x: x[0])
         return [e for _, _, e in rows[lo:hi]]
 
+    def copy(self, before: float | None = None) -> EventLedger:
+        """A fresh, unfrozen ledger with the same events (only those recorded strictly before
+        ``before`` if given). Reading a copy never moves the original's freeze."""
+        other = EventLedger()
+        for e in self.all():
+            if before is None or e.recorded_at < before:
+                other.append(e)
+        return other
+
     def all(self) -> list[Event]:
         return sorted(
             (e for rows in self._by_item.values() for _, _, e in rows),

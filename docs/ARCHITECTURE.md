@@ -193,6 +193,11 @@ These are enforced in code and tests, not by convention.
 | I82 | Identity outcomes are `resolved`, `ambiguous`, `candidates` or `unknown`; only an exact canonical name or a unique alias resolves, and a shared name is ambiguous, never resolved by picking one. Similarity yields candidates unless the measured baseline policy `similarity` is chosen. Identity assertions merge entities only with independent roots and no declared distinction; a false merge is detectable against a truth partition (I60). |
 | I83 | The instrument does not change the system: audit probes create no access or feedback events. Longitudinal measures are separate — retrieval retention, evidence retention, stale-answer rate, revision latency and no-answer rate are never combined into one score. |
 | I84 | Effects in the adaptive study are inferred over independent replicates by paired differences with a Student-t interval, an exact sign test, Holm within a world x metric family and an underpowered flag; an onset of damage is the earliest checkpoint or dose on the declared grid at which the adjusted test is significant in the harmful direction, and is a property of the tested design. |
+| I85 | An autopsy is a chain of links, each `found`, `missing` (with what is missing) or `not_applicable` (with why); no step is reconstructed from a guess. Every reference resolves to a stored item, event, report, claim or source, or is reported missing, and `verify_autopsy` rebuilds the autopsy and compares its digest. Hidden truth appears only in `analysis`, never in the chain. What happened after the cutoff is shown separately and is never an input. |
+| I86 | Replay rebuilds a run's state at a cutoff into fresh objects from stored records (items recorded at or before it, events recorded strictly before it) and applies the same decision code as the live run (`retention.Memory`). It never mutates the live run (the ledger is copied, so even its freeze on decisions does not move), and replaying at every recorded decision time must reproduce the recorded answer; a mismatch is future information reaching the past, or nondeterminism. |
+| I87 | A counterfactual changes exactly one of the schedule, the rank weight or the importance model, holds the evidence (items and event ledger) byte-identical (checked by digest before and after), and reports every changed decision with its recorded reason. It is a decision-level recomputation, not a causal estimate of system behaviour under the alternative: the loop-inclusive re-simulation, whose own feedback differs, is reported beside it. |
+| I88 | A benchmark is a pure function of its stored manifest (seed families, environments, declared parameter jitter, systems and policies by digest, metrics, statistics, sampling). Test and calibration seeds are separate families and new; every run is a record; a reproduction re-runs a stated set of replicates into an independent store and compares digests, and recomputes the analysis from the stored runs. |
+| I89 | Benchmark inference is per replicate: a paired difference against the baseline, a Student-t interval, an exact sign test, Holm within track x environment x metric, and a pooled family over (environment, replicate) units. Autopsy completeness, replay exactness and provenance completeness are measured on sampled decisions of every run, not assumed. |
 
 Tooling standard: Python ≥3.12, Pydantic v2, `mypy --strict`, Ruff, pytest with warnings
 as errors, `uv` with a committed lockfile, CI on every push.
@@ -251,7 +256,9 @@ as errors, `uv` with a committed lockfile, CI on every push.
 | **Retention schedule / decision** | A recorded availability rule (keep-all, age window, importance gate, stale-aware gate) and one decision with reason, cutoff and basis. | `retention.py` |
 | **Claim (free text)** | A claim-like sentence, extracted or unresolved, with text digest, spans and lineage. | `claims.py` |
 | **Identity outcome** | resolved, ambiguous, candidates or unknown for a mention against a registry. | `identity.py` |
-| **Autopsy** | The provenance DAG from a response back through retrieval → versions → operations → experiences, at a point in both time axes. | Phase 17 (traversal: `graph.trace_provenance`) |
+| **Autopsy** | The evidence chain behind one answer or belief at a cutoff: answer, decision, ranked candidates, signals, policy, selected version, retention and importance state, claim and entity resolution, originating experience, source, validity, corrections, contradictions, and what happened afterwards; every link found, missing or not applicable. | `autopsy.py` (Phase 17 in part; traversal: `graph.trace_provenance`) |
+| **Replay / counterfactual** | A stored run's state rebuilt at a cutoff without touching it; the same decisions recomputed with one component changed and the evidence fixed. | `autopsy.py` |
+| **Benchmark manifest** | The complete, content-addressed definition of a multi-seed benchmark. | `benchmark.py` |
 
 The `update`/`correct` distinction is deliberate: it separates *temporal change* from
 *error repair*, which is necessary to study supersession and contradiction.
@@ -1123,6 +1130,53 @@ incrementally; the study does not use the run manifest (it is a lab like Phases 
 11-12); probes of one key are correlated (pooled Wilson intervals are shown, inference uses
 replicates).
 
+### 4.19 Memory autopsy, temporal replay and the multi-seed benchmark (Super-Phase 6)
+
+Super-Phase 6 adds a laboratory layer over the Super-Phase 5 memory lab and the Phase 11-12
+belief lab; it changes no manifest, schema or stored digest. The one change to existing code is
+extracting the decision logic of `retention.simulate` into `retention.Memory` so that the
+simulator and replay run the *same* code; the 120 stored Super-Phase 5 runs of one replicate
+still reproduce with identical digests.
+
+**Replay** (I86). A finished run holds the recorded items and the event ledger. `replay_memory`
+rebuilds the memory at a cutoff into fresh objects, `snapshot` summarises what it holds and
+answers (with keys answered by an item that known, later evidence supersedes, and keys with
+concurrent disagreement), and `historical_mismatches` checks that replaying at recorded
+decision times reproduces the live answers. Replay of the Phase 1-7 substrate
+(`substrate_state`, `substrate_hierarchy`) wraps the existing pure functions and shows the log
+digest is unchanged. Phase 11-12 belief ledgers already replay (`revision.reconstruct`,
+`historical_mismatches`) and are measured in the benchmark.
+
+**Autopsy** (I85). `memory_autopsy` explains one answer at one time as thirteen ordered links
+(answer, decision, ranked candidates with state, freshness, importance and rank, policy digests,
+signals with importance components and their event ids, selected version, retention and
+importance state, claim and entity resolution with a span check, originating experience, source
+with its declared prior, temporal validity, corrections and contradictions visible at the
+cutoff) plus what was recorded later (evidence, events, later answers). `belief_autopsy` maps a
+Phase 11-12 `BeliefTrace` onto the same vocabulary, so a missing experience, memory version or
+graph claim becomes a missing link.
+
+**Counterfactual** (I87). `counterfactual` recomputes every audit and user-query decision of a
+run with one of schedule, rank weight or importance changed on identical evidence and reports
+which decisions changed and why (base winner archived under the alternative, or the two
+winners' freshness and importance under both configurations). The interpretation is stored
+with the result: not causal, because the alternative's own feedback would differ; a
+re-simulation of the alternative shows by how much.
+
+**Benchmark** (I88, I89). Two tracks over five environments (stable, drifting, repetitive,
+noisy, adversarial): the eight Super-Phase 5 memory systems on generated worlds, and five
+Phase 11-12 belief policies on belief worlds. Worlds are generated per (seed family,
+replicate, environment) with declared seeded jitter and near-collision entities; measures are
+retrieval accuracy, stale-answer rate, retention, contradiction handling, importance
+calibration and provenance completeness (memory); belief correctness, coverage, selective
+accuracy, contradiction-heavy accuracy, raw and recalibrated calibration error and belief-trace
+completeness (belief); and, for both, sampled autopsy completeness and replay exactness.
+
+Known limits: the autopsy covers the two labs, not the Phase 2-7 retrieval traces (whose
+provenance walk is `graph.trace_provenance`); environments are generated and their parameters
+declared; belief and memory tracks share environment names, not worlds; a fixed-evidence
+counterfactual cannot say what the alternative would have caused.
+
 ## 5. Module Boundaries
 
 The dependency rule is strict: **dependencies point inward toward `core`**. `core` imports
@@ -1164,6 +1218,11 @@ revision      evidence ledger, events, replay, reconstruction, violations, selec
 calibration   reliability, Brier, isotonic, risk-coverage, abstention quality, subgroups  (exists)
 belief_worlds, belief_lab, belief_cases, belief_study, belief_ops, belief_demo,
 belief_run, belief_report   Phase 11-12 generated worlds, studies, cases, run and report  (exists)
+autopsy       replay of stored runs at a cutoff, evidence-linked autopsy of memory answers and beliefs,
+              fixed-evidence counterfactuals, substrate replay  (exists)
+autopsy_demo  the fixed autopsy / replay / counterfactual demonstration  (exists)
+benchmark, benchmark_report, benchmark_run
+              multi-seed benchmark over five environments, manifest, reproduction, report  (exists)
 identity      conservative entity identity for text: registry, outcomes, merge assertions  (exists)
 claims        conservative free-text claim extraction; unresolved claims as objects  (exists)
 adaptive      access and feedback events, leakage-safe ledger, auditable importance, ablation  (exists)
@@ -1304,7 +1363,7 @@ deferrals — is in [ROADMAP.md](ROADMAP.md).
 | 14 | Memory contamination and adversarial experiments | Every attack-caused failure traces to an injected experience |
 | 15 | Long-horizon benchmark generation | Datasets reproducible from parameters with measured difficulty |
 | 16 (part) | Large-scale longitudinal evaluation | Curves decomposable to per-probe observations; Super-Phase 5 delivers retention and stale-answer curves on generated worlds |
-| 17 | Memory autopsy | Every autopsy link resolves to a verified artifact |
+| 17 (part) | Memory autopsy | Every autopsy link resolves to a verified artifact; Super-Phase 6 delivers autopsy, replay and counterfactuals over the memory and belief labs |
 | 18 | Experiment orchestration and parameter sweeps | Sweeps reproduce; resumption equals uninterrupted runs |
 | 19 | Advanced statistical and research analysis | Methods reproduce reference values; coverage checked |
 | 20 | Interactive research observatory and API | Every rendered number links to its artifact |
@@ -1427,3 +1486,10 @@ deferrals — is in [ROADMAP.md](ROADMAP.md).
 | 2026-09-30 | Identity: similarity produces candidates, a shared alias is ambiguous, merge assertions need independent roots and no declared distinction (I82). The `similarity` policy exists only as a measured baseline. Rejected: highest-similarity-wins as the default. | False merges must be measurable, and a false merge is silent by construction. |
 | 2026-09-30 | Inference is over independent replicates (paired, t interval, sign test, Holm per world and metric); pooled Wilson intervals are shown beside it (I84). Rejected: probe-level McNemar as the primary test. | Probes of one key are correlated; the independent unit here is the seeded world. |
 | 2026-09-30 | Reproduction re-simulates the first and last replicates into an independent store; the test suite compares whole-study digests of two executions. Rejected: re-running the full study inside the run. | The check is exact on the runs it covers and its cost is bounded. |
+| 2026-09-30 | The decision logic of the simulator moved into `retention.Memory`, used by both the simulator and replay. Rejected: a second implementation for replay. | Replay is only evidence if it runs the code that decided; the refactor was checked against the 120 stored Super-Phase 5 runs of a replicate (identical digests). |
+| 2026-09-30 | Replay copies the ledger and rebuilds items into fresh objects; the truncated and the bulk replay must agree. Rejected: reading the live ledger at an earlier time. | Reading a live ledger moves its freeze (I78) and cannot show that nothing later was needed. |
+| 2026-09-30 | An autopsy link is found, missing or not applicable, and hidden truth lives only in `analysis` (I85). Rejected: filling a missing step with the most plausible value; dropping the step. | Missing provenance must be visible; a truth-derived link would make the explanation circular. |
+| 2026-09-30 | The belief autopsy is an adaptor onto the existing `BeliefTrace` (I76), not a second trace builder. | One definition of a complete belief trace; the unified chain reports its `missing` list as missing links. |
+| 2026-09-30 | Counterfactuals change exactly one of schedule, rank weight, importance; ingestion and identity are excluded (they would change the evidence). The result is labelled decision-level, not causal, and a re-simulation is reported beside it (I87). Rejected: calling the fixed-evidence difference an effect. | The feedback loop is part of the system; holding evidence fixed answers a different question. |
+| 2026-09-30 | The benchmark uses new seed families, declared parameter jitter and 16-key worlds; test and calibration families are separate (I88). Rejected: reusing the earlier phases' seeds. | Earlier numbers informed the designs; fresh seeds keep the benchmark from being tuned to them. |
+| 2026-09-30 | The benchmark reproduces a stated representative set of replicates (first, middle, last memory; first, last belief) rather than all runs; the analysis is recomputed from the stored runs. Rejected: re-running everything. | Bounded cost with exact digest comparison on the runs covered. |
