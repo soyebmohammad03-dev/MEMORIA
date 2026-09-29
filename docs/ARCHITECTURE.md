@@ -177,6 +177,14 @@ These are enforced in code and tests, not by convention.
 | I66 | An interference population is a prefix of one deterministic distractor sequence, and every generated experience carries its ground-truth label (role, mechanism, entity, key, value). |
 | I67 | A run's graph snapshots are recorded by digest, one per probe (in its trace and the run record), and rebuilt rather than stored; reproduction re-derives them. |
 | I68 | Temporally impossible graph configurations are errors, suspicious ones warnings, by-design retroactivity (corrections) info; diagnostics never repair. |
+| I69 | Evidence is authoritative and immutable; a belief is a derived record over it. Contradictory evidence is never deleted, and a belief is never overwritten: a revision is an event with a predecessor, the fingerprints before and after, the reason, and the signals that decided it. |
+| I70 | The evidence ledger is replayable: `replay` re-derives every belief and every event from the arrival sequence and the policy, and `violations` audits time, future leakage, chains, supersession, epistemic status, confidence rises and the contribution arithmetic. A belief at time *t* uses only evidence recorded at or before *t*. |
+| I71 | Recency is not truth and contradiction is not falsity: a later report supersedes only outside the concurrency window, a rejected value is "not adopted", and `false` is never a belief state. Ties are not wins. |
+| I72 | Copies are not independent: corroboration counts source roots after declared copy links; the naive and the independent count are both recorded. Source reliability is a declared prior (cold start is uninformative); a learned trust is circular and always labelled so. |
+| I73 | Uncertainty components have operational definitions (`UNCERTAINTY_DEFS`); a confidence is a rule-based score in [0, 1] and is called probabilistic only where a calibration on held-out replicates supports it. Ranking scores are never relabelled as probabilities. |
+| I74 | Calibration is fitted on calibration replicates (seed family 2) and evaluated on test replicates (seed family 1); hidden truth and hidden source reliability are used only for analysis. Log loss is refused unless the score is declared probabilistic. |
+| I75 | Abstention is a recorded decision with its inputs; errors prevented and answers lost are both counted. Risk–coverage curves handle ties in expectation. |
+| I76 | A belief trace either reaches the original experience through every link (answer, belief, events, contribution arithmetic, evidence, source, claim, memory versions, consolidation, graph edges) or lists exactly which link is missing. |
 
 Tooling standard: Python ≥3.12, Pydantic v2, `mypy --strict`, Ruff, pytest with warnings
 as errors, `uv` with a committed lockfile, CI on every push.
@@ -996,6 +1004,57 @@ outside the manifest runner (traces are recomputed on replay and compared by dig
 stored); interaction experiments intervene on one designed world each and report observed
 effects, not universal causal claims.
 
+### 4.17 Belief revision, contradiction and calibrated uncertainty (Phases 11–12)
+
+**Belief states.** A belief is a stance on one value of one key over a valid-time
+interval: `SUPPORTED`, `CONTESTED`, `CORRECTED`, `SUPERSEDED`, `UNKNOWN`, `UNRESOLVED`,
+`REJECTED`. It records supporting and contradicting evidence, source roots, the naive and
+the independent counts, a score `weight / (competing mass + prior mass)`, an uncertainty
+decomposition (aleatoric, epistemic, source, temporal, identity, retrieval,
+contradiction), predecessors, the revision count and the policy digest. There is no
+`false` state: a value that lost is `REJECTED` ("not adopted"), which records the
+decision, not a discovered fact.
+
+**Change versus contradiction.** Reports of one key more than `concurrency_days` apart
+are a change (supersession); reports inside the window disagree (a contradiction), and a
+`correct` report is a correction. The window is a declared parameter of the temporal
+policy and of the ontology and is varied in the study, not tuned to it.
+
+**Contradiction taxonomy.** Twelve types — direct value, numeric, categorical, temporal,
+negation, source disagreement, entity collision, scope, partial, supersession,
+granularity, missing qualifier — classify pairs of assertions parsed from a declared
+grammar (nothing is inferred from free text). Relations are directional (`contradicts`,
+`supersedes`, `corrects`, `narrows`, `qualifies`), carry a declared confidence (not a
+calibrated one), evidence, scope and time, and never state that either side is false.
+Clusters (open, resolved, chain) are built from the Phase 8 graph snapshot.
+
+**Revision policies.** Eight policies A–H are content-hashed presets of one signal family
+(count, trust neutral/declared/learned, recency, depth, staleness, independence,
+penalty, lineage, identity) plus margin, minimum roots, confirmation roots, hysteresis
+and an unresolve horizon. Each exposes the signals it used in every contribution.
+
+**Ledger.** `run_ledger` processes arrivals in logical time (and withdrawals) and emits
+events with fingerprints, transitions, closed-vocabulary reasons and trust changes.
+`reconstruct` rebuilds a belief at any earlier time; `historical_mismatches` finds any
+disagreement between a reconstruction and the live run; `RunIdentity` names world, memory
+state, evidence-set and arrival hashes, sources, policy, temporal policy, confidence
+model, seed and the forgetting/consolidation/interference settings.
+
+**Sources.** A `SourceModel` holds classes with declared Beta priors and declared copy
+links; a `TrustLedger` credits per report and labels learned trust circular.
+
+**Calibration and abstention.** Equal-width reliability with Wilson bin intervals, ECE,
+MCE, Brier, log loss (probabilistic only), isotonic recalibration (PAV), subgroup
+calibration, risk–coverage with AURC against an oracle, AUROC, and abstention quality
+(errors prevented, answers lost, net).
+
+**Methodology.** Ten generated worlds × eight policies × replicates; paired Newcombe
+differences, exact McNemar, Holm correction within world and family, key-level cluster
+analysis, and underpowered flags. Operations (interference, forgetting, consolidation)
+are applied to the evidence and compared to raw with a "more confident, not more
+correct" flag. Belief answers are compared to Phase 7 hybrid top-1 retrieval on the same
+probes. Observational comparisons are described, never claimed as causal.
+
 ## 5. Module Boundaries
 
 The dependency rule is strict: **dependencies point inward toward `core`**. `core` imports
@@ -1030,6 +1089,13 @@ graph         semantic memory graph: claims, snapshots, diffs, analytics, diagno
 forgetting    forgetting policies, availability records, cascade, measurements  (exists)
 interference  controlled interference populations, observations, load curves  (exists)
 memory_lab    Phase 8-10 matrix, structure/interference/interaction studies, demonstration  (exists)
+sources       source classes, declared priors, copy links, independence, trust ledger  (exists)
+contradictions  claim ontology, assertion grammar, twelve-type taxonomy, contradiction graph  (exists)
+beliefs       evidence items, belief states, policies A-H, period construction, derivation  (exists)
+revision      evidence ledger, events, replay, reconstruction, violations, selective decisions  (exists)
+calibration   reliability, Brier, isotonic, risk-coverage, abstention quality, subgroups  (exists)
+belief_worlds, belief_lab, belief_cases, belief_study, belief_ops, belief_demo,
+belief_run, belief_report   Phase 11-12 generated worlds, studies, cases, run and report  (exists)
 autopsy       Phase 17: autopsy records over graph.trace_provenance
 api           FastAPI surface over the above (no logic of its own)
 observatory   interactive visualisation (consumes api only)
@@ -1158,8 +1224,8 @@ deferrals — is in [ROADMAP.md](ROADMAP.md).
 | 8 ✓ | Provenance and semantic memory graph | Graph is a pure, reproducible function of stored artifacts |
 | 9 ✓ | Forgetting laboratory | Every forgotten memory reconstructible; retention measured with intervals |
 | 10 ✓ | Interference laboratory | Each generator parameter measurably moves its target property |
-| 11 | Contradiction and belief revision | Revision measured without equating newer with truer; collateral damage measured |
-| 12 | Source reliability and uncertainty | Separate, calibrated confidence components; no universal score |
+| 11 ✓ | Contradiction and belief revision | Revision measured without equating newer with truer; collateral damage measured |
+| 12 ✓ | Source reliability and uncertainty | Separate, calibrated confidence components; no universal score |
 | 13 | Adaptive retrieval policies | Every adaptation a replayable event |
 | 14 | Memory contamination and adversarial experiments | Every attack-caused failure traces to an injected experience |
 | 15 | Long-horizon benchmark generation | Datasets reproducible from parameters with measured difficulty |
@@ -1271,3 +1337,7 @@ deferrals — is in [ROADMAP.md](ROADMAP.md).
 | 2026-09-28 | Key-level (cluster) analysis beside probe-level McNemar; comparisons changing several variables are labelled composite. | Probes about one key share memory (the Phase 4 caveat), and a multi-variable change cannot be attributed to one variable (I27). |
 | 2026-09-28 | `scenarios._ENTITIES` gains five names, including the near-collisions "Anna" and "Benn". | Worlds with more entities; every existing world uses at most five, so its seeded choices and digests are unchanged. |
 | 2026-09-28 | Three existing tests were changed: the hybrid signal registry includes `suppression` and the three graph signals, and two run-record shape tests include the evolved `graphs` and `forgetting` (and assert they are omitted when empty). | Each asserts a shape that grew additively; digests they protect are pinned by unchanged golden tests. |
+| 2026-09-29 | Beliefs are derived from an immutable evidence ledger by pure policies; there is no `false` state and no in-place update (I69, I71). Rejected: a mutable belief table. | Revision must be replayable and auditable; falsity is not established by disagreement. |
+| 2026-09-29 | Change is separated from contradiction by a declared concurrency window, not by recency. Rejected: "latest report wins". | Recency is not truth (I71); the window is varied in the study. |
+| 2026-09-29 | Calibrators are fitted on separate replicates and decisions keep the raw score. Rejected: fitting and evaluating on the same runs. | Recalibration evaluated on its own fit data is trivially perfect. |
+| 2026-09-29 | Source trust is a declared prior; learned trust is labelled circular. Rejected: inferring reliability from agreement and presenting it as ground truth. | Agreement with the majority rewards copying (I72). |

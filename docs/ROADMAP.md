@@ -208,6 +208,8 @@ graph, forgetting and interference, built as one super-phase) are complete.
 
 ## Phase 11 — Contradiction and belief revision (L9)
 
+**Status: complete** (with Phase 12, as one laboratory; see [results](experiments/phase11-12-beliefs-calibration.md)). Deviations: beliefs and their subsystems are new modules (`beliefs`, `revision`, `contradictions`) rather than an extension of `taxonomy.Relation`; the contradiction taxonomy is built on the Phase 8 graph snapshot.
+
 - **Objective:** represent competing claims and how beliefs change.
 - **Capabilities:** belief states over competing claims; compatible, temporal change,
   correction, direct contradiction, unresolved conflict, source-dependent disagreement;
@@ -223,6 +225,8 @@ graph, forgetting and interference, built as one super-phase) are complete.
 - **Deferred:** source weighting (12).
 
 ## Phase 12 — Source reliability and uncertainty (L10, L11)
+
+**Status: complete** (see above). Deviation: confidence components are carried by beliefs and predictions, not attached to memory versions; adaptive use of confidence in retrieval stays deferred to Phase 13.
 
 - **Objective:** make source and confidence explicit variables that can be varied
   independently of content.

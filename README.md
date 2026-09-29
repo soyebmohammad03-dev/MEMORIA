@@ -74,6 +74,13 @@ questions (RQ1–RQ15), target architecture and staged roadmap to Phase 22 are i
   so interference is separated from retrieval failure; the Phase 8–10 laboratory runs a
   world matrix, ablations, interaction experiments and an end-to-end demonstration
   ([results](docs/experiments/phase8-10-graph-forgetting-interference.md))
+- **Beliefs and calibration** (`beliefs`, `revision`, `contradictions`, `sources`,
+  `calibration`): beliefs as derived, replayable records over an immutable evidence ledger;
+  a twelve-type contradiction taxonomy that separates change from conflict; eight revision
+  policies that expose their signals; independence-aware corroboration; calibrated
+  confidence, uncertainty decomposition and selective prediction; a ten-world study with
+  adversarial cases and a provenance trace to the original experience
+  ([results](docs/experiments/phase11-12-beliefs-calibration.md))
 
 Neural embeddings are an experimental representation, not ground truth: in the Phase 5
 study they rate numeric changes and contradictions as similar to a query as true
@@ -129,7 +136,7 @@ for embedder in (HashedNgramEmbedder(), neural):  # control condition, then neur
 The Phase 5 study is one command: `python -m memoria.semantic_eval var/artifacts`; the
 Phase 6 study is `python -m memoria.hybrid_eval var/artifacts minilm` (or `hashed`, which
 needs no model). The Phase 7 lab is `python -m memoria.consolidation_eval var/artifacts`;
-the Phase 8–10 laboratory is `python -m memoria.memory_lab var/artifacts`.
+the Phase 8–10 laboratory is `python -m memoria.memory_lab var/artifacts`; the Phase 11–12 study is `python -m memoria.belief_run var/phase11` (`--quick` for three worlds).
 
 ## Research areas
 
