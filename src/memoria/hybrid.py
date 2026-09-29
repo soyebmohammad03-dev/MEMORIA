@@ -32,10 +32,10 @@ import math
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Any, Literal, Self
+from typing import Any, Literal, Protocol, Self
 
 from pydantic import Field, model_validator
 
@@ -132,6 +132,16 @@ class Exclusion(StrEnum):
     SUPERSEDED = "superseded"
     FORGOTTEN = "forgotten"
     STALE = "stale"  # a derived memory whose supporting evidence changed after it was built
+    # Not retrievable under a forgetting intervention (archived, excluded, forgotten). The
+    # memory still exists in history; only its availability changed (Phase 9).
+    FORGOTTEN_BY_POLICY = "forgotten_by_policy"
+
+
+# Availability under a forgetting intervention (Phase 9). Every state keeps the memory in
+# history; only "active" and "suppressed" (penalised by the suppression signal) are
+# retrievable. Without an intervention every memory is active.
+Availability = Literal["active", "suppressed", "archived", "excluded", "forgotten"]
+RETRIEVABLE: frozenset[str] = frozenset({"active", "suppressed"})
 
 
 MemoryKind = Literal["fact", "note"]  # carries one structured claim / free text
@@ -156,6 +166,8 @@ class Entry:
     level: Level = Level.L1
     status: EpistemicStatus = EpistemicStatus.OBSERVED
     stale: bool = False
+    availability: Availability = "active"
+    suppression: float = 0.0  # soft suppression strength in [0, 1] (0 unless suppressed)
 
     @property
     def digest(self) -> str:
@@ -209,13 +221,14 @@ def _claim_of(
 class CorpusIdentity(ExtensibleRecord):
     """What a corpus contains. Its digest identifies the retrieval universe."""
 
-    _evolved = frozenset({"derived", "stale"})
+    _evolved = frozenset({"derived", "stale", "forgetting"})
 
     known_at: UTCDatetime
     versions: tuple[Digest, ...]  # every version recorded by known_at, sorted
     experiences: tuple[Digest, ...]  # cited experiences that are available, sorted
     derived: tuple[Digest, ...] = ()  # consolidated memories added, sorted
     stale: tuple[Digest, ...] = ()  # those among them that are invalidated, sorted
+    forgetting: Digest | None = None  # the forgetting record whose availability applies
 
 
 @dataclass(frozen=True)
@@ -352,6 +365,32 @@ class Corpus:
             experiences=self.experiences,
         )
 
+    def with_availability(
+        self, states: Mapping[str, tuple[Availability, float]], record: str
+    ) -> Corpus:
+        """This corpus with availability applied by the forgetting record ``record``.
+
+        ``states`` maps entry digests to (availability, suppression); unlisted entries stay
+        active. Nothing is removed: forgotten memories remain entries (history), and the
+        corpus identity names the record, so every trace over it cites the intervention.
+        """
+        if self.identity.forgetting is not None:
+            raise ValueError("availability is applied once, from one forgetting record")
+        unknown = set(states) - {e.digest for e in self.entries}
+        if unknown:
+            raise ValueError(f"availability for unknown entries: {sorted(unknown)[:3]}")
+        entries = []
+        for e in self.entries:
+            state, strength = states.get(e.digest, ("active", 0.0))
+            if not 0.0 <= strength <= 1.0 or (strength > 0) != (state == "suppressed"):
+                raise ValueError(f"{e.digest}: suppression must be in (0, 1] iff suppressed")
+            entries.append(replace(e, availability=state, suppression=strength))
+        return replace(
+            self,
+            entries=tuple(entries),
+            identity=self.identity.model_copy(update={"forgetting": record}),
+        )
+
 
 def conflict(entry: Entry, claims: Sequence[Claim], valid_at: datetime) -> ConflictStatus | None:
     """The entry's claim against every other known claim on its key, in priority order
@@ -469,6 +508,30 @@ class SignalValue(Record):
 
 
 Extracted = tuple[float | None, str | None, tuple[tuple[str, Scalar], ...]]
+
+
+class GraphView(Protocol):
+    """What graph signals and the graph generator read from a semantic memory graph
+    (:class:`memoria.graph.MemoryGraph`). Each link names the edge and rule behind it."""
+
+    @property
+    def digest(self) -> str: ...
+
+    def entity_link(self, version: str, entity: str) -> tuple[str, str, str] | None:
+        """(edge id, rule, epistemic status) linking the memory to the resolved entity."""
+        ...
+
+    def claim_link(self, version: str, key: str) -> tuple[str, str, str] | None:
+        """(edge id, rule, epistemic status) linking the memory to a claim on ``key``."""
+        ...
+
+    def contradiction_edges(self, version: str) -> tuple[str, ...]:
+        """Contradiction edges touching the claims the memory is linked to."""
+        ...
+
+    def expand(self, key: str, hops: int) -> list[tuple[str, int]]:
+        """Memories within ``hops`` of the claims on ``key``: (version digest, hops)."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -629,6 +692,53 @@ def _support(ctx: Context, e: Entry) -> Extracted:
     return float(len(e.version.derived_from)), None, inputs
 
 
+def _suppression(ctx: Context, e: Entry) -> Extracted:
+    return e.suppression, None, (("availability", e.availability),)
+
+
+def _graph_or_missing(ctx: Context) -> tuple[GraphView | None, str | None]:
+    if ctx.engine.graph is None:
+        return None, "no_graph"
+    if ctx.query.key is None:
+        return None, "query_has_no_key"
+    return ctx.engine.graph, None
+
+
+def _link_inputs(link: tuple[str, str, str] | None, target: str) -> tuple[tuple[str, Scalar], ...]:
+    if link is None:
+        return (("reason", f"no edge to {target}"), ("target", target))
+    edge, rule, status = link
+    return (("edge", edge), ("reason", f"{rule} ({status})"), ("target", target))
+
+
+def _graph_entity(ctx: Context, e: Entry) -> Extracted:
+    graph, why = _graph_or_missing(ctx)
+    ent = entity(ctx.query.key or "")
+    if graph is None or ent is None:
+        return None, why or "query_key_names_no_entity", ()
+    link = graph.entity_link(e.digest, ent)
+    return (0.0 if link is None else 1.0), None, _link_inputs(link, f"entity:{ent}")
+
+
+def _graph_claim(ctx: Context, e: Entry) -> Extracted:
+    graph, why = _graph_or_missing(ctx)
+    if graph is None:
+        return None, why, ()
+    key = ctx.query.key or ""
+    link = graph.claim_link(e.digest, key)
+    return (0.0 if link is None else 1.0), None, _link_inputs(link, f"key:{key}")
+
+
+def _graph_contradiction(ctx: Context, e: Entry) -> Extracted:
+    if ctx.engine.graph is None:
+        return None, "no_graph", ()
+    edges = ctx.engine.graph.contradiction_edges(e.digest)
+    inputs: tuple[tuple[str, Scalar], ...] = (("edges", len(edges)),)
+    if edges:
+        inputs += (("first_edge", edges[0]),)
+    return float(len(edges)), None, inputs
+
+
 def _contradiction(ctx: Context, e: Entry) -> Extracted:
     status = ctx.engine.conflict(e, ctx.query.valid_at)
     if status is None:
@@ -691,6 +801,22 @@ SIGNALS: dict[str, SignalDef] = {
         SignalDef(
             "contradiction", "1", -1, (0.0, 1.0), _no_params, _contradiction,
             "1 if another known claim disputes the memory's claim (see ConflictStatus).",
+        ),
+        SignalDef(
+            "suppression", "1", -1, (0.0, 1.0), _no_params, _suppression,
+            "Soft-suppression strength set by a forgetting intervention (0 when active).",
+        ),
+        SignalDef(
+            "graph_entity", "1", 1, (0.0, 1.0), _no_params, _graph_entity,
+            "1 if a graph edge links the memory to the query key's resolved entity.",
+        ),
+        SignalDef(
+            "graph_claim", "1", 1, (0.0, 1.0), _no_params, _graph_claim,
+            "1 if a graph edge links the memory to a claim on the query key (any status).",
+        ),
+        SignalDef(
+            "graph_contradiction", "1", -1, None, _no_params, _graph_contradiction,
+            "Contradiction edges touching the claims the memory is linked to (proximity).",
         ),
     )
 }  # fmt: skip
@@ -767,7 +893,7 @@ def normalize(
 
 # --- policy ---------------------------------------------------------------------------------------
 
-GENERATORS = ("lexical", "metadata", "semantic")
+GENERATORS = ("graph", "lexical", "metadata", "semantic")
 TIE_BREAK = "final>relevance>memory_id>version>digest"
 RRF = "Reciprocal rank fusion, Cormack, Clarke & Buettcher (SIGIR 2009)"
 
@@ -775,7 +901,7 @@ RRF = "Reciprocal rank fusion, Cormack, Clarke & Buettcher (SIGIR 2009)"
 class GeneratorSpec(Record):
     """A candidate generator and its configuration. ``limit`` caps what it proposes."""
 
-    name: Literal["lexical", "metadata", "semantic"]
+    name: Literal["graph", "lexical", "metadata", "semantic"]
     limit: int = Field(ge=1)
     params: Inputs = ()
 
@@ -840,8 +966,17 @@ class RetrievalPolicy(ExtensibleRecord):
         if gens != sorted(set(gens)):
             raise ValueError("generators must be unique and sorted by name")
         for g in self.generators:
-            allowed = {"lexical": ("b", "k1"), "semantic": ("index",), "metadata": ()}[g.name]
+            allowed = {
+                "lexical": ("b", "k1"),
+                "semantic": ("index",),
+                "metadata": (),
+                "graph": ("hops",),
+            }[g.name]
             _need(dict(g.params), allowed)
+            if g.name == "graph" and not (
+                isinstance(dict(g.params)["hops"], int) and 1 <= int(dict(g.params)["hops"]) <= 4
+            ):
+                raise ValueError("graph generator hops must be an integer in 1..4")
             if g.name == "semantic" and dict(g.params)["index"] not in ("exact", "hnsw", "scan"):
                 raise ValueError("semantic index must be 'exact', 'hnsw' or 'scan'")
         if list(self.exclude) != sorted(set(self.exclude)):
@@ -869,6 +1004,12 @@ class RetrievalPolicy(ExtensibleRecord):
 
     def signal(self, name: str) -> SignalConfig | None:
         return next((s for s in self.signals if s.name == name), None)
+
+    @property
+    def uses_graph(self) -> bool:
+        return any(s.name.startswith("graph_") for s in self.signals) or any(
+            g.name == "graph" for g in self.generators
+        )
 
 
 # --- trace records -----------------------------------------------------------------------------
@@ -922,7 +1063,7 @@ class CandidateRecord(ExtensibleRecord):
     version) say what kind of memory it is, so a derived memory is never mistaken for one.
     """
 
-    _evolved = frozenset({"level", "status", "stale"})
+    _evolved = frozenset({"level", "status", "stale", "availability"})
 
     version: Digest
     memory_id: str
@@ -935,6 +1076,7 @@ class CandidateRecord(ExtensibleRecord):
     level: Level = Level.L1
     status: EpistemicStatus = EpistemicStatus.OBSERVED
     stale: bool = False
+    availability: Availability = "active"
 
 
 class Contribution(Record):
@@ -1119,14 +1261,17 @@ def _expose(
     return placed
 
 
-class HybridTrace(Record):
+class HybridTrace(ExtensibleRecord):
     """A complete, self-checking record of one hybrid retrieval.
 
     Every generator run, every union member (with its exclusion, if any) and every
     surviving candidate (with signals, contributions and placement) is recorded. The
     validator re-derives normalisation, contributions, relevance, penalties, final
     scores, the order, exposure, selection and explanations from the raw values.
+    ``graph`` (schema evolution) names the graph snapshot graph signals read.
     """
+
+    _evolved = frozenset({"graph"})
 
     query: HybridQuery
     policy: RetrievalPolicy
@@ -1137,10 +1282,13 @@ class HybridTrace(Record):
     candidates: tuple[CandidateRecord, ...]
     ranking: tuple[Ranked, ...]
     selected: tuple[Digest, ...]
+    graph: Digest | None = None
 
     @model_validator(mode="after")
     def _check_invariants(self) -> Self:
         p = self.policy
+        if p.uses_graph != (self.graph is not None):
+            raise ValueError("a trace names its graph iff the policy reads one")
         # Generators and union.
         if [g.generator for g in self.generators] != [g.name for g in p.generators]:
             raise ValueError("generator runs do not match the policy")
@@ -1167,6 +1315,8 @@ class HybridTrace(Record):
             expected: Exclusion | None = None
             if c.excluded is Exclusion.MALFORMED_PROVENANCE:
                 expected = c.excluded
+            elif c.availability not in RETRIEVABLE:
+                expected = Exclusion.FORGOTTEN_BY_POLICY
             elif c.stale and Exclusion.STALE in p.exclude:
                 expected = Exclusion.STALE
             elif c.temporal.value in {x.value for x in p.exclude}:
@@ -1277,6 +1427,7 @@ class Engine:
         default_factory=dict, repr=False
     )
     _conflicts: dict[str, tuple[str, ...]] = field(default_factory=dict, repr=False)
+    graph: GraphView | None = None
 
     def __post_init__(self) -> None:
         if self.index is not None:
@@ -1361,6 +1512,14 @@ class Engine:
                 return run("not_applicable")
             rows = [(1.0, e) for e in entries if e.claim is not None and e.claim.key == query.key]
             considered = len(entries)
+        elif spec.name == "graph":
+            if query.key is None:
+                return run("not_applicable")
+            if self.graph is None:
+                return run("failed", error="no graph was given")
+            reach = dict(self.graph.expand(query.key, int(params["hops"])))
+            rows = [(quantize(1 / (1 + reach[e.digest])), e) for e in entries if e.digest in reach]
+            considered = len(entries)
         else:
             try:
                 if params["index"] == "scan":
@@ -1417,6 +1576,8 @@ class Engine:
         )
         if uses_vectors and self.embedder is None:
             raise PolicyError("the policy uses embeddings but the engine has no embedder")
+        if policy.uses_graph and self.graph is None:
+            raise PolicyError("the policy reads a memory graph but the engine has none")
         clock = _Clock(timings)
 
         with clock("generate"):
@@ -1443,6 +1604,8 @@ class Engine:
                 reason = None
                 if e.missing:
                     reason = Exclusion.MALFORMED_PROVENANCE
+                elif e.availability not in RETRIEVABLE:
+                    reason = Exclusion.FORGOTTEN_BY_POLICY
                 elif e.stale and Exclusion.STALE in policy.exclude:
                     reason = Exclusion.STALE
                 elif status.value in excluded_statuses:
@@ -1460,6 +1623,7 @@ class Engine:
                         level=e.level,
                         status=e.status,
                         stale=e.stale,
+                        availability=e.availability,
                     )
                 )
             survivors = [e for e, c in zip(union, candidates, strict=True) if c.excluded is None]
@@ -1595,6 +1759,7 @@ class Engine:
                 candidates=tuple(candidates),
                 ranking=tuple(ranking),
                 selected=tuple(r.version for r in ranking[: query.limit]),
+                graph=self.graph.digest if policy.uses_graph and self.graph else None,
             )
         return trace
 

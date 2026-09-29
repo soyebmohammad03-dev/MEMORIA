@@ -13,7 +13,8 @@ Phases 1–4 are complete and form the **substrate**: bitemporal append-only his
 (1), formation and retrieval with traces (2), reproducible experiments with
 interventions (3), and evaluation with a failure taxonomy and paired statistics (4).
 Phases 5–22 build on it without weakening any invariant. Phases 5 (semantic memory), 6
-(hybrid, explainable retrieval) and 7 (consolidation, abstraction, hierarchy) are complete.
+(hybrid, explainable retrieval), 7 (consolidation, abstraction, hierarchy) and 8–10 (memory
+graph, forgetting and interference, built as one super-phase) are complete.
 
 ---
 
@@ -141,6 +142,20 @@ Phases 5–22 build on it without weakening any invariant. Phases 5 (semantic me
   identical canonical export; every edge cites the record that justifies it.
 - **Dependencies:** 1–7.
 - **Deferred:** interactive exploration (20); graph learning.
+- **Status:** complete (with 9 and 10). `memoria.graph`: typed nodes and provenance-aware
+  edges (rule, evidence, epistemic status never stronger than an endpoint; only
+  record-copying edges observed), structured claims only for structured evidence,
+  timeline events, contradictions and supersession, derived claims linked to what they
+  restate, inferred co-mention links, snapshots with source-state hashes, rebuild
+  verification, diffs, decomposed analytics (all and active views), temporal diagnostics,
+  bounded provenance traversal, and a retrieval view (`graph` generator, `graph_entity`,
+  `graph_claim`, `graph_contradiction` signals). `memoria.entities`: conservative, recorded,
+  reversible resolution. Manifest schema v4 (`graph_policy`, in the "retrieval" variable).
+  **Deviations:** no NetworkX (standard library, canonical records); runs record snapshots
+  by digest and rebuild them rather than storing them; node types for evaluations and
+  interventions, and `created_by`/`influenced`/`corrects` edges, are not built (evaluations
+  and interventions are reached through the run; corrections are `supersedes[correction]`).
+  Results: docs/experiments/phase8-10-graph-forgetting-interference.md.
 
 ## Phase 9 — Forgetting laboratory (L7)
 
@@ -157,6 +172,17 @@ Phases 5–22 build on it without weakening any invariant. Phases 5 (semantic me
   curves carry intervals.
 - **Dependencies:** 3, 4, 7.
 - **Deferred:** curve fitting (16).
+- **Status:** complete. `memoria.forgetting`: availability states (active, suppressed,
+  archived, excluded, forgotten), ten rules (age, fifo, recency with graded suppression,
+  importance, access from earlier traces, validity, contradiction, provenance, hybrid votes,
+  selective by entity / interval / source / kind / contradiction / level), cascade or
+  explicit retention of derived memories with dangling and unsupported-abstraction
+  diagnostics, preserved aggregates, and memory-level measurements (retention, precision,
+  recall, accidental retention, collateral, provenance completeness, stale rate,
+  contradiction visibility). Manifest schema v4 (`forgetting_policy`, its own variable);
+  hard exclusion `forgotten_by_policy`, the `suppression` signal. **Deviations:**
+  interference-based, retrieval-induced and capacity-pressure forgetting are represented
+  only as the access, fifo and hybrid rules; retention curves over time are Phase 16.
 
 ## Phase 10 — Interference laboratory (L8)
 
@@ -171,6 +197,14 @@ Phases 5–22 build on it without weakening any invariant. Phases 5 (semantic me
   reported with paired intervals.
 - **Dependencies:** 4, 5, 6.
 - **Deferred:** sweep orchestration (18).
+- **Status:** complete. `memoria.interference`: eight mechanisms (proactive, retroactive,
+  temporal, semantic near-collision, entity, contradiction, consolidation, retrieval mix)
+  with frequency, wording, recency and source modifiers; nested, fully labelled
+  populations; manipulation checks per parameter; observations with target and distractor
+  roles and three confusions; load curves against the load-0 baseline with paired
+  statistics, Holm across loads, onset, and the interference / retrieval-failure
+  decomposition. World-level interference is an `inject` intervention with four distractor
+  kinds.
 
 ## Phase 11 — Contradiction and belief revision (L9)
 

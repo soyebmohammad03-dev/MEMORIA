@@ -715,7 +715,9 @@ def hybrid_benchmark() -> tuple[Dataset, HybridBenchmark]:
 
 # --- Phase 7 consolidation worlds ------------------------------------------------------------
 
-_ENTITIES = ("Ana", "Ben", "Chen", "Dara", "Eli")
+# Appended in Phase 8 (worlds with more entities); "Anna" and "Benn" are deliberate
+# near-collisions with "Ana" and "Ben". Worlds with at most five entities are unchanged.
+_ENTITIES = ("Ana", "Ben", "Chen", "Dara", "Eli", "Anna", "Farid", "Benn", "Hugo", "Ines")
 _VALUES = {
     "home": ("Paris", "Berlin", "Munich", "Rome", "Oslo", "Lisbon", "Vienna", "Prague"),
     "employer": ("Acme", "Globex", "Initech", "Umbrella", "Hooli", "Vandelay"),

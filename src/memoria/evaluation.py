@@ -71,13 +71,16 @@ COMPARATOR = "tokens-v1"
 CLASSIFIER = "provenance-v1"
 # The experimental variables of a manifest. The retriever and the representation it
 # embeds with form one variable, "retrieval": a representation has no effect except
-# through a retriever signal, and the runner requires them to be declared together.
+# through a retriever signal, and the runner requires them to be declared together. The
+# graph policy belongs to it for the same reason (only graph signals and the graph
+# generator read the graph).
 MANIFEST_VARIABLES: dict[str, tuple[str, ...]] = {
     "dataset": ("dataset",),
     "interventions": ("interventions",),
     "policy": ("policy",),
-    "retrieval": ("retriever", "representation", "retrieval_policy"),
+    "retrieval": ("retriever", "representation", "retrieval_policy", "graph_policy"),
     "consolidation": ("consolidation_policy",),
+    "forgetting": ("forgetting_policy",),
     "responder": ("responder",),
 }
 

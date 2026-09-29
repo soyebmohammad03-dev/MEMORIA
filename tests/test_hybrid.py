@@ -117,12 +117,16 @@ def test_signal_registry_declares_every_contract_field() -> None:
     assert set(SIGNALS) == {
         "attribute",
         "contradiction",
+        "graph_claim",
+        "graph_contradiction",
+        "graph_entity",
         "lexical",
         "provenance",
         "recency",
         "semantic",
         "source",
         "support",
+        "suppression",
         "temporal",
         "type",
     }

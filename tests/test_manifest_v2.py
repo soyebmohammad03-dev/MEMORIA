@@ -251,8 +251,9 @@ def test_embedder_resolution_is_round_tripped() -> None:
 
 
 def test_run_records_are_unchanged_in_shape() -> None:
-    # Schema v3 adds only the evolved ``hierarchies``, omitted while empty, so a run
-    # without consolidation serialises exactly as before (golden run digests pin this).
+    # Schema v3 adds only the evolved ``hierarchies`` and v4 ``graphs`` and ``forgetting``,
+    # omitted while empty, so a run without them serialises exactly as before (golden run
+    # digests pin this).
     assert set(RunRecord.model_fields) == {
         "manifest",
         "dataset",
@@ -260,7 +261,10 @@ def test_run_records_are_unchanged_in_shape() -> None:
         "log",
         "outcomes",
         "hierarchies",
+        "graphs",
+        "forgetting",
     }
     d = "sha256:" + "0" * 64
     record = RunRecord(manifest=d, dataset=d, interventions=(), log=d, outcomes=d)
-    assert "hierarchies" not in record.canonical()
+    for evolved in ("hierarchies", "graphs", "forgetting"):
+        assert evolved not in record.canonical()

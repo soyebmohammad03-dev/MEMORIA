@@ -22,7 +22,7 @@ questions (RQ1–RQ15), target architecture and staged roadmap to Phase 22 are i
 
 ## Status
 
-**Phases 1–7 complete.** What exists today:
+**Phases 1–10 complete.** What exists today:
 
 - **Memory history** (`core`, `store`): content-addressed, immutable, bitemporal records;
   create / update / correct / forget; an append-only, verified SQLite log
@@ -56,6 +56,24 @@ questions (RQ1–RQ15), target architecture and staged roadmap to Phase 22 are i
   structured information-loss reports; consolidation and hybrid retrieval as run-manifest
   variables (schema v3); a stability–plasticity laboratory
   ([results](docs/experiments/phase7-consolidation.md))
+- **Memory graph** (`graph`, `entities`): a derived, content-addressed semantic graph of
+  experiences, memory versions, derived memories, entities, claims, events, sources,
+  intervals, consolidations and retrievals, in which every edge names its rule, cites its
+  evidence and carries an epistemic status that can never be stronger than its endpoints;
+  structured claims only where evidence is structured; conservative, recorded, reversible
+  entity resolution; snapshots verified by rebuild; diffs; decomposed analytics; temporal
+  diagnostics; bounded provenance traversal; graph signals and a graph generator for
+  hybrid retrieval
+- **Forgetting** (`forgetting`): forgetting as a recorded intervention on availability —
+  never deletion — with ten rules (age, FIFO, recency suppression, importance, access,
+  validity, contradiction, provenance, hybrid votes, selective), cascade or explicit
+  retention of derived memories, and memory- and probe-level measurements including
+  collateral forgetting
+- **Interference** (`interference`, `memory_lab`): eight mechanisms of controlled
+  interference on nested, fully labelled populations, measured against a load-0 baseline
+  so interference is separated from retrieval failure; the Phase 8–10 laboratory runs a
+  world matrix, ablations, interaction experiments and an end-to-end demonstration
+  ([results](docs/experiments/phase8-10-graph-forgetting-interference.md))
 
 Neural embeddings are an experimental representation, not ground truth: in the Phase 5
 study they rate numeric changes and contradictions as similar to a query as true
@@ -63,8 +81,11 @@ paraphrases. In the Phase 6 study, a superseded claim outranked the current one 
 policies that surface rather than penalise conflict. Retrieval relevance is a policy
 score, not truth. Consolidation's gains and losses are both measured: in the Phase 7 lab,
 temporal consolidation raised correct answers while exact deduplication merged identical
-statements from different periods. No memory graph, API or UI exists yet. This README
-describes only what is implemented.
+statements from different periods. The memory graph is an analytical representation, not
+a source of truth: the log and hierarchies stay authoritative, and inferred links (a
+free-text memory naming an entity and a value) are labelled inferred because co-mention is
+not assertion. Forgetting is measured, not assumed to help. No API or UI exists yet. This
+README describes only what is implemented.
 
 The core needs no neural dependencies. For the neural representation and approximate
 search, install the extras and fetch the pinned model explicitly (nothing downloads
@@ -107,7 +128,8 @@ for embedder in (HashedNgramEmbedder(), neural):  # control condition, then neur
 
 The Phase 5 study is one command: `python -m memoria.semantic_eval var/artifacts`; the
 Phase 6 study is `python -m memoria.hybrid_eval var/artifacts minilm` (or `hashed`, which
-needs no model). The Phase 7 lab is `python -m memoria.consolidation_eval var/artifacts`.
+needs no model). The Phase 7 lab is `python -m memoria.consolidation_eval var/artifacts`;
+the Phase 8–10 laboratory is `python -m memoria.memory_lab var/artifacts`.
 
 ## Research areas
 

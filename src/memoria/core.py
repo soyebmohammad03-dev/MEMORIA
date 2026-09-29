@@ -887,7 +887,14 @@ class RunManifest(ExtensibleRecord):
     """
 
     _evolved = frozenset(
-        {"representation", "retriever", "retrieval_policy", "consolidation_policy"}
+        {
+            "representation",
+            "retriever",
+            "retrieval_policy",
+            "consolidation_policy",
+            "graph_policy",
+            "forgetting_policy",
+        }
     )
 
     name: str = Field(min_length=1)
@@ -905,6 +912,11 @@ class RunManifest(ExtensibleRecord):
     # artifact referenced by digest (like the dataset). Absent means not used.
     retrieval_policy: Digest | None = None
     consolidation_policy: Digest | None = None
+    # Schema v4: a GraphPolicy (the semantic memory graph a hybrid policy's graph signals
+    # and generator read) and a ForgettingPolicy (availability applied at query time; the
+    # log is never changed). Stored artifacts referenced by digest; absent means not used.
+    graph_policy: Digest | None = None
+    forgetting_policy: Digest | None = None
 
     @model_validator(mode="after")
     def _check_invariants(self) -> Self:
@@ -912,6 +924,10 @@ class RunManifest(ExtensibleRecord):
             raise ValueError("a manifest declares exactly one of retriever / retrieval_policy")
         if self.consolidation_policy is not None and self.retrieval_policy is None:
             raise ValueError("consolidated memory is retrieved only by a hybrid retrieval policy")
+        if self.retrieval_policy is None and (
+            self.graph_policy is not None or self.forgetting_policy is not None
+        ):
+            raise ValueError("graph and forgetting policies apply to hybrid retrieval only")
         return self
 
 
@@ -952,10 +968,11 @@ class RunRecord(ExtensibleRecord):
     """The deterministic result of executing a manifest: digests of every artifact.
 
     ``hierarchies`` (schema v3, absent by default) lists the consolidation hierarchies a
-    run built, in checkpoint order.
+    run built, in checkpoint order. ``graphs`` and ``forgetting`` (schema v4) list, one per
+    probe in probe order, the graph snapshot and the forgetting record each probe used.
     """
 
-    _evolved = frozenset({"hierarchies"})
+    _evolved = frozenset({"hierarchies", "graphs", "forgetting"})
 
     manifest: Digest
     dataset: Digest  # the effective dataset, after interventions
@@ -963,3 +980,5 @@ class RunRecord(ExtensibleRecord):
     log: Digest  # canonical export of the resulting memory log
     outcomes: Digest  # RunOutcomes artifact
     hierarchies: tuple[Digest, ...] = ()
+    graphs: tuple[Digest, ...] = ()
+    forgetting: tuple[Digest, ...] = ()

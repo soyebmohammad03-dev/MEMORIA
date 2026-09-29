@@ -42,8 +42,10 @@ from memoria.core import (
     StepOutcome,
 )
 from memoria.embeddings import Embedder, HashedNgramEmbedder
+from memoria.forgetting import ForgettingPolicy, ForgettingRecord, apply, forget
 from memoria.formation import EpisodicPolicy, FormationPolicy, StatementPolicy, form
-from memoria.hybrid import Corpus, Engine, HybridQuery, RetrievalPolicy
+from memoria.graph import GraphPolicy, MemoryGraph, build_graph
+from memoria.hybrid import Corpus, Engine, HybridQuery, HybridTrace, RetrievalPolicy
 from memoria.hybrid import extractive as hybrid_extractive
 from memoria.interventions import Contaminate, Delay, Drop, Inject, Intervention, Reorder
 from memoria.retrieval import (
@@ -303,6 +305,13 @@ def _execute_hybrid(
     Traces and responses are stored as artifacts (they are not log records: a hybrid trace
     covers derived memories the log never holds). Consolidation reads the log's history at
     each checkpoint and never writes to it.
+
+    Schema v4: a forgetting policy is applied at each probe's ``known_at`` to the corpus
+    the probe retrieves from (its access history is the traces of earlier probes, strictly
+    before); each :class:`~memoria.forgetting.ForgettingRecord` is stored. A graph policy
+    builds the semantic memory graph of that same corpus; its snapshot digest is recorded
+    in the trace and the run record, and the snapshot is rebuilt, not stored (graphs are
+    derived indexes, rebuildable from the log; :func:`reproduce` re-derives them).
     """
     assert manifest.retrieval_policy is not None
     retrieval = store.get_record(RetrievalPolicy, manifest.retrieval_policy)
@@ -311,6 +320,18 @@ def _execute_hybrid(
         if manifest.consolidation_policy is not None
         else None
     )
+    graph_policy = (
+        store.get_record(GraphPolicy, manifest.graph_policy)
+        if manifest.graph_policy is not None
+        else None
+    )
+    forgetting = (
+        store.get_record(ForgettingPolicy, manifest.forgetting_policy)
+        if manifest.forgetting_policy is not None
+        else None
+    )
+    if retrieval.uses_graph != (graph_policy is not None):
+        raise ValueError("a graph policy is declared iff the retrieval policy reads a graph")
     uses_vectors = hybrid_uses_vectors(retrieval) or (
         consolidation is not None and consolidation.uses_vectors
     )
@@ -352,11 +373,24 @@ def _execute_hybrid(
                 hierarchies.append(h)
         indexes: dict[str, SemanticIndex] = {}
         probes = []
+        graphs: list[str] = []
+        records: list[str] = []
+        history: list[HybridTrace] = []  # earlier probes' traces: the access history
         for probe in dataset.probes:
             corpus = Corpus.from_log(log, probe.known_at)
             latest = next((h for h in reversed(hierarchies) if h.at <= probe.known_at), None)
             if latest is not None:
                 corpus = corpus.with_derived(latest.memories, invalidated(latest, corpus))
+            if forgetting is not None:
+                accesses = [t for t in history if t.query.known_at < probe.known_at]
+                decided: ForgettingRecord = forget(corpus, forgetting, probe.known_at, accesses)
+                records.append(store.put_record(decided))
+                corpus = apply(corpus, decided)
+            graph = None
+            if graph_policy is not None:
+                snapshot = build_graph(corpus, graph_policy, [latest] if latest else [])
+                graph = MemoryGraph(snapshot)
+                graphs.append(snapshot.digest)
             index = None
             if needs_index:
                 assert embedder is not None
@@ -376,8 +410,9 @@ def _execute_hybrid(
             )
             vectors = memo.vectors if memo is not None else {}
             similarities = memo.similarities if memo is not None else {}
-            engine = Engine(corpus, embedder, index, vectors, similarities)
+            engine = Engine(corpus, embedder, index, vectors, similarities, graph=graph)
             trace = engine.retrieve(retrieval, query)
+            history.append(trace)
             response = hybrid_extractive(trace, corpus)
             store.put_record(trace)
             store.put_record(response)
@@ -398,6 +433,8 @@ def _execute_hybrid(
         log=log_digest,
         outcomes=store.put_record(RunOutcomes(steps=steps, probes=tuple(probes))),
         hierarchies=tuple(h.digest for h in hierarchies),
+        graphs=tuple(graphs),
+        forgetting=tuple(records),
     )
     store.put_record(record)
     store.put_record(Execution.current(record))

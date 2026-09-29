@@ -30,7 +30,9 @@ Every arrow is a recorded, replayable transformation with provenance. Phases 1�
 implement experience → formation → representation (bitemporal versions) → retrieval →
 response → evaluation; Phase 5 adds vector representations and indexing, Phase 6
 decomposes retrieval into recorded stages (§4.10), and Phase 7 adds consolidation and
-abstraction as derived, hierarchical memory over immutable history (§4.12). The remaining
+abstraction as derived, hierarchical memory over immutable history (§4.12). Phases 8–10
+(one combined super-phase) add the semantic memory graph (§4.13), forgetting as a recorded
+intervention on availability (§4.14) and controlled interference (§4.15). The remaining
 arrows are the roadmap (§8).
 
 ### 1.2 Research questions
@@ -63,6 +65,19 @@ Phase 7 asks, serving RQ1, RQ8, RQ9 and RQ12: *how does memory consolidation str
 affect long-horizon retrieval quality, provenance fidelity, information loss,
 contradiction handling, computational cost and downstream memory reliability?* (§4.12,
 docs/experiments/phase7-consolidation.md).
+
+Phases 8–10 ask, serving RQ2, RQ3, RQ13 and RQ15 (§4.13–4.16,
+docs/experiments/phase8-10-graph-forgetting-interference.md):
+
+| # | Question |
+|---|---|
+| RQ-G1 | Can a provenance-preserving semantic memory graph represent entities, claims, events, temporal relations, contradictions and derived memories without collapsing evidence and inference? |
+| RQ-G2 | How does graph structure affect retrieval, contradiction discovery, provenance traversal and long-horizon reasoning? |
+| RQ-F1 | What happens to retrieval quality, provenance completeness, contradiction visibility and memory integrity under different forgetting policies? |
+| RQ-F2 | Can a system forget operationally while retaining auditable historical evidence? |
+| RQ-I1 | How do memories interfere with one another as the memory population grows? |
+| RQ-I2 | Which interference mechanisms are most damaging (semantic, entity, temporal overlap, contradictory values, retrieval competition, consolidation, recency, frequency)? |
+| RQ-I3 | Can interference be measured separately from retrieval failure? |
 
 ## 2. Research Principles
 
@@ -150,6 +165,18 @@ These are enforced in code and tests, not by convention.
 | I54 | Every derived memory has a loss report: preserved, lost, altered, conflicting and unsupported features, and lineage coverage of experiences and sources. Its `lost` count must equal the report's. |
 | I55 | A consolidation or retrieval policy is a content-addressed record; a run manifest references it by digest (schema v3), and every manifest field belongs to exactly one comparison variable (I39 extended with "consolidation"). |
 | I56 | A derived memory whose evidence changed after it was built (retracted, or another value recorded inside its interval) is marked stale at query time; policies declare whether stale memories are excluded. |
+| I57 | The memory graph is derived, never evidence: a `GraphSnapshot` is a pure function of (corpus, hierarchies, traces, run, `GraphPolicy`); rebuilding reproduces it byte for byte; nothing is written back to the log or a hierarchy. |
+| I58 | Every graph edge names the rule that produced it, cites the records that justify it, and carries an epistemic status no stronger than either endpoint. Only edges that copy a fact from a stored record may be *observed*; co-mentions and resolution candidates are *inferred*. |
+| I59 | Structured claims exist only where evidence is structured (the statement language, or a derived memory's declared key and value); free text and inferred patterns are listed as claim-unavailable, never parsed into claims. |
+| I60 | Entity resolution merges only by rules the policy accepts; name similarity yields a candidate, never identity, unless a policy says so. Each decision records rule, similarity, declared confidence and evidence; rejecting a pair reverses it; two structured identifiers in one entity are reported as a false merge. |
+| I61 | Forgetting changes availability, never history. A `ForgettingRecord` decides every memory's state with the signals its rule used; the log, experiences and hierarchies are unchanged, and the corpus identity (hence every trace over it) names the record. |
+| I62 | A derived memory whose evidence is unavailable becomes unavailable (`cascade`) unless the policy explicitly retains it (`retain`); retained ones are listed, so forgotten evidence never influences retrieval unrecorded. |
+| I63 | An unavailable memory is excluded before scoring with reason `forgotten_by_policy`; a trace that scores one is invalid. Soft suppression is a recorded signal, not a hidden penalty. |
+| I64 | Access-based forgetting reads only retrieval traces recorded strictly before the intervention. |
+| I65 | Interference is measured against a controlled baseline: the same replicate at load 0. A failure counts as interference only if the target was retrieved at load 0 and a labelled distractor displaced it at load L. |
+| I66 | An interference population is a prefix of one deterministic distractor sequence, and every generated experience carries its ground-truth label (role, mechanism, entity, key, value). |
+| I67 | A run's graph snapshots are recorded by digest, one per probe (in its trace and the run record), and rebuilt rather than stored; reproduction re-derives them. |
+| I68 | Temporally impossible graph configurations are errors, suspicious ones warnings, by-design retroactivity (corrections) info; diagnostics never repair. |
 
 Tooling standard: Python ≥3.12, Pydantic v2, `mypy --strict`, Ruff, pytest with warnings
 as errors, `uv` with a committed lockfile, CI on every push.
@@ -195,7 +222,15 @@ as errors, `uv` with a committed lockfile, CI on every push.
 | **Consolidation policy / hierarchy** | What decides grouping, guards, promotion, abstraction and frequency; the content-addressed result of one consolidation, with merge decisions, loss reports and importance records. | `consolidation.py` |
 | **Loss report** | Structured feature accounting of a derived memory against its inputs (I54). | `consolidation.py` |
 | **Consolidation lab** | Strategy, ablation, stability–plasticity and retrieval-mode families as ordinary runs, evaluated and compared by Phase 4, plus consolidation metrics against ground-truth labels. | `consolidation_eval.py` |
-| **Autopsy** | The provenance DAG from a response back through retrieval → versions → operations → experiences, at a point in both time axes. | Phase 17 |
+| **Graph snapshot / policy** | The semantic memory graph of one corpus: typed nodes and provenance-aware edges, structured claims, the entity resolution, claim-unavailable memories and broken provenance; its policy (resolution, claim extraction, temporal semantics, inferred links, retrieval view). | `graph.py` |
+| **Graph claim** | Subject, predicate, object, qualifier, interval, sources, epistemic status, supporting memories, contradicting claims, support and dispute counts. | `graph.py` |
+| **Mention / resolution** | A normalised name evidence uses (structured identifier or surface name); the recorded decisions that group mentions into entities. | `entities.py` |
+| **Provenance trace** | A bounded, deterministic walk from a retrieval or memory to experiences, sources, claims, entities, intervals and consolidations, reporting broken chains. The substrate of the Phase 17 autopsy. | `graph.py` |
+| **Forgetting policy / record** | A content-addressed rule (age, fifo, recency, importance, access, validity, contradiction, provenance, hybrid, selective) and action (suppress, archive, exclude, forget); the per-memory availability decisions it produced at one time, with diagnostics. | `forgetting.py` |
+| **Availability** | active, suppressed (retrievable, penalised), archived, excluded, forgotten (not retrievable). History is unchanged in every state. | `hybrid.py` |
+| **Interference scenario** | One target fact, one probe and a labelled, nested sequence of distractors of one mechanism; observations and load curves against its load-0 baseline. | `interference.py` |
+| **Memory lab** | The Phase 8–10 world matrix, structure, interference and interaction studies and the demonstration. | `memory_lab.py` |
+| **Autopsy** | The provenance DAG from a response back through retrieval → versions → operations → experiences, at a point in both time axes. | Phase 17 (traversal: `graph.trace_provenance`) |
 
 The `update`/`correct` distinction is deliberate: it separates *temporal change* from
 *error repair*, which is necessary to study supersession and contradiction.
@@ -726,6 +761,241 @@ notes join claim-based groups only under the semantic regime. Rendered contents 
 templates; a query that asks about an attribute's history is answered from timeline
 renderings that the extractive responder cannot read as a single value.
 
+### 4.13 Semantic memory graph (Phase 8)
+
+```mermaid
+flowchart LR
+    LOG["MemoryLog: L0 experiences, L1 versions (authoritative)"] --> C["Corpus at known_at (+ hierarchy, + availability)"]
+    H["Hierarchy L2-L4 (authoritative, Phase 7)"] --> C
+    F["ForgettingRecord (availability)"] --> C
+    C -->|"build_graph(policy): pure"| G["GraphSnapshot (derived, content-addressed)"]
+    T["HybridTraces, run"] --> G
+    G --> A["analytics: measure_graph (all / active view)"]
+    G --> D["temporal_diagnostics, broken provenance"]
+    G --> P["trace_provenance (autopsy traversal)"]
+    G -->|"MemoryGraph view"| R["hybrid retrieval: graph generator + graph_* signals"]
+    G -.->|"verify_snapshot: rebuild and compare"| C
+```
+
+**Ontology.** Nodes: `experience`, `memory` (an L1 version), `derived` (L2–L4), `entity` (one
+per mention), `claim`, `event` (a timeline period), `source`, `interval`, `consolidation`
+(a hierarchy), `retrieval` (a trace), `run`. Edges and the rules that produce them:
+
+| relation | from → to | rule(s) | status |
+|---|---|---|---|
+| sourced-from | experience → source | source-id | observed |
+| derived-from | memory → experience; derived → derived; claim → claim | cites; the derived operation; restates | observed; memory's status |
+| asserts | experience → claim; derived → claim | statement; declared-claim / abstraction | observed; memory's status |
+| supports | memory → claim | cites-assertion (a cited experience asserts it) | observed |
+| about | claim / event → entity | structured-key | observed (claim), derived (event) |
+| mentions | memory → entity | surface-name-v1 (capitalised name heuristic) | derived |
+| same-entity | entity → entity | an accepted resolution decision's rule | derived (inferred for `similar`) |
+| related-to | memory → claim; entity → entity; derived → consolidation; retrieval → run | value-mention; resolution-candidate; produced-by; part-of-run | inferred; inferred; memory's status; observed |
+| contradicts | claim → claim; event → event | same-instant-disagreement; contested-period | derived |
+| supersedes | memory → memory; claim → claim / event; event → event | version-chain; correction / retraction; temporal-change / correction | observed; derived |
+| temporally-precedes | event → event | occurrence-order | derived |
+| same-event | claim → event | timeline-period | derived |
+| summarized-by | event → derived (L4 timeline) | timeline | abstracted |
+| consolidated-from | derived (L2) → memory | grouping:<regime> | derived |
+| valid-during | claim / event / derived → interval | timeline-period / declared-interval | derived or the memory's status |
+| retrieved-by | memory / derived → retrieval | selected | the memory's status |
+
+An edge's status is never stronger than either endpoint's (observed < derived < abstracted
+< inferred), only the (relation, rule) pairs marked observed above may be observed, and
+`value-mention`, `resolution-candidate` and `similar` edges are always inferred (I58). The
+snapshot validator enforces all three, plus the endpoint contract of every relation.
+
+**Claims** (I59). Observed claims: one per (key, verb, value, instant) of statement
+experiences, with the Phase 7 timeline period as interval. Derived claims: an L2 memory's
+declared key and value (status derived); L3 profiles and L4 timelines restate their parents'
+claims (abstracted), linked to the observed claims they restate. Co-change patterns and
+free text are listed in `unavailable` with the reason. A `GraphClaim` carries subject
+(resolved entity), predicate (attribute), object (normalised value; none for a retraction),
+qualifier (verb or operation), interval, sources, status, supporting memories, contradicting
+claims, and support and dispute counts. There is no scalar confidence: calibrated
+confidence is Phase 12, and a count pair is what the evidence supports.
+
+**Entity resolution** (I60, `entities`). Mentions are structured identifiers (the entity of
+a statement key) and surface names (capitalised runs in free text). Rules: `exact`,
+`normalized` (NFKC, case folding, punctuation and possessives removed), `alias` (declared
+table), `structured`, `similar` (character-trigram Jaccard ≥ threshold, or initials/prefix
+match). The conservative policy accepts the identity rules only; `similar` pairs are
+candidates. The aggressive policy (an ablation) accepts them with single linkage, whose
+transitive chaining is itself a measured failure mode. Every decision records rule,
+similarity, the policy's declared per-rule confidence (a stated prior, not a calibrated
+probability), evidence and whether it merged; `rejected` pairs reverse a merge.
+
+**Inferred links.** With `value_mentions`, a free-text memory that names an entity is linked
+to that entity's claims whose value it contains verbatim (token sequence), as `related-to
+[value-mention]`, inferred. Co-mention is not assertion: "Ana does not live in Paris" is
+linked to `ana.home = paris` (tested), which is why these links are never stronger than
+inferred and are ablated in the lab.
+
+**Snapshot format.** `GraphSnapshot`: `schema_version` (`memoria-graph-v1`), the full
+`GraphPolicy` (resolution, claim extraction `statement-v1`, temporal semantics
+`occurrence-v1`, inferred links, view), `source_state` = hash of (corpus, hierarchies,
+forgetting record, traces, run) and each of them by digest, the `Resolution`, node and edge
+counts, nodes by id, edges by (source, relation, target, rule), claims, claim-unavailable
+memories and broken provenance. Its digest is its content hash. `verify_snapshot`
+rebuilds from the named sources and requires byte identity (tampering, including
+structurally valid forged edges, is detected); `diff_graphs` reports added and removed
+nodes, forgotten and restored nodes (availability changed; history kept), changed claims,
+added and resolved contradictions, and changed entity links and provenance edges.
+
+**Analytics** (`measure_graph`, over all nodes or the active view): node kinds, relation
+and status counts, components, degree distribution, contradiction density, provenance
+depth (hops to an experience) and unreachable evidence, evidence coverage, unsupported
+claims, entity ambiguity, orphans, temporal consistency, source concentration
+(Herfindahl index over source classes), top memories and claims by degree (structural, not
+importance), unavailable nodes. There is no single quality score.
+
+**Graph-aware retrieval.** `hybrid.GraphView` is the consumer-owned protocol; `MemoryGraph`
+implements it. Generator `graph` (parameter `hops`, 1–4): memories within `hops` edges of
+the claims on the query key, score 1/(1+hops). Signals: `graph_entity` (an edge links the
+memory to the query key's resolved entity), `graph_claim` (an edge links it to a claim on
+the query key, any status), `graph_contradiction` (contradiction edges near its claims,
+direction −1). Each records the edge id, the rule and status, and the target as inputs; the
+trace names the snapshot digest (I43 still re-derives every number). Under the `active`
+view, unavailable memories are not traversed; `historical` traverses everything.
+
+**Temporal diagnostics** (I68): errors — evidence after record (a memory cites evidence
+that occurred after it was recorded), supersession direction, temporal order, future
+evidence in a retrieval, contradiction timing, claim before evidence; warnings — a
+correction or retraction recorded before what it resolves, derived validity starting
+before its evidence, an event starting before any report of it (info when a correction
+replaced the period).
+
+**Provenance traversal** (`trace_provenance`): breadth-first from a retrieval or memory along
+provenance relations (retrieved-by reversed, consolidated-from, derived-from, produced-by,
+asserts and supports, about, same-event, valid-during, sourced-from, and inferred
+value-mention links, which are counted), edges sorted, bounded by depth and node count
+(`truncated`), reporting memories with no path to an experience and unavailable memories on
+the path as broken. This is the traversal the Phase 17 autopsy will record.
+
+Known limits: surface names are a capitalisation heuristic (sentence-initial words other
+than a small function-word list become mentions, places are entities); co-mention is not
+negation-aware; the graph is rebuilt in full (no incremental maintenance); a run rebuilds
+it per probe (about 0.1 s for 1,600 nodes).
+
+### 4.14 Forgetting semantics (Phase 9)
+
+```mermaid
+flowchart LR
+    C["Corpus at t (L1 + derived)"] --> FP["ForgettingPolicy: rule + action + params"]
+    TR["earlier traces (access history, before t)"] --> FP
+    FP --> FR["ForgettingRecord: one decision per memory (state, signals, reason)"]
+    FR -->|"cascade / retain"| DV["derived memories: unavailable, or retained and listed"]
+    FR -->|"apply: availability, identity names the record"| C2["Corpus'"]
+    C2 --> R["retrieval: forgotten_by_policy exclusion, suppression signal"]
+    C2 --> G["graph: availability on nodes; active view"]
+    LOG["MemoryLog (unchanged)"] -.-> C
+```
+
+**States.** Historically every memory exists. `active` and `suppressed` are retrievable;
+`archived`, `excluded` and `forgotten` are not (all three are hard retrieval exclusions;
+the names record intent: kept for audit, excluded from retrieval only, forgotten by
+policy). The graph shows availability on nodes and its `active` view drops what is not
+retrievable.
+
+**Rules** (every signal recorded per decision): `age` (recorded more than `max_age_days`
+ago), `fifo` (beyond the newest `capacity`), `recency` (graded soft suppression, strength =
+1 − 0.5^(age/half-life) below a threshold), `importance` (the Phase 7 decomposed importance
+below its threshold), `access` (selected fewer than `min_access` times in earlier traces and
+older than `grace_days`), `validity` (the claim's timeline period ended by t − grace; free
+text: undecidable, retained), `contradiction` (corrected or retracted claims; same-instant
+contested claims only if `forget_contested`), `provenance` (redundant copies of a (key,
+value, period) beyond the `keep` earliest; the last evidence of a claim is never forgotten),
+`hybrid` (votes of access, age, contradiction, importance and validity; `min_votes`; each
+vote recorded), `selective` (a `Selector`: entity, occurrence interval, source class, memory
+kind, contradictory, levels — for example derived memories only). `preserve_aggregates`
+keeps per-key counts of reports made unavailable and of their distinct values.
+
+**Derived memories** (I62): `cascade` makes a derived memory unavailable when any L1
+version it covers, or any parent, is unavailable; `retain` keeps it retrievable and lists it
+(`evidence_retained`), with `dangling` (all evidence hidden) and `unsupported_abstractions`
+(an L3/L4 memory with a hidden parent). Stale (I56) available derived memories are listed
+too.
+
+**In runs** (manifest schema v4, variable "forgetting"): the policy is applied at each
+probe's `known_at` to the corpus that probe retrieves from, with the earlier probes'
+traces as access history (I64); each record is stored, one per probe.
+
+**Measurements** (`measure_forgetting`, per record; the lab adds run-level ones): retention
+(retrievable after / before), unavailable and suppressed counts; with a target set —
+precision, recall, accidental retention, collateral (non-target memories made
+unavailable), derived memories still carrying target evidence; provenance completeness and
+stale rate of available derived memories; contradiction visibility (keys with a
+same-instant disagreement still showing two values). *Collateral forgetting* is relevant
+information unintentionally made unavailable: at memory level, non-target memories hidden;
+at probe level, probes whose expected answer was retrievable before the intervention and
+is not after it. Answer integrity (lab): answers from memory whose evidence is available
+and current.
+
+Known limits: `forget` on the log (Phase 1 tombstones) is a different thing — a recorded
+belief change — and is not used to simulate forgetting; decisions are recomputed per probe
+rather than maintained incrementally; access counts come from the run's own probes, not
+from Phase 13 feedback events.
+
+### 4.15 Interference semantics (Phase 10)
+
+A scenario has one target (`set <t>.home = V`, reliable source), one probe (`Where does T
+live?`, key `t.home`, expectation V) and a deterministic sequence of distractors; load L is
+the first L of them (nested populations, I66), each repeated `frequency` times.
+
+| mechanism | distractors share with the target | ground truth unchanged because |
+|---|---|---|
+| proactive | key; other values; occurred before it | the target is the latest report |
+| retroactive | key; other values; occurred after the probe's valid time | the probe asks about an earlier time |
+| temporal | key; other values; before and after it | the probe falls in the target's period |
+| semantic | a near-collision entity name, the attribute, the wording | another entity |
+| entity | the entity; other attributes | other keys |
+| contradiction | key; other values; the same instant; unreliable source | the target's value is authored truth (I20) |
+| consolidation | the semantic population, paraphrased and consolidated | derived memories are not evidence |
+| retrieval | a cycle of semantic, entity, proactive, contradiction | as above |
+
+Modifiers: `wording` (statement template or free-text paraphrase), `recency` (older, or
+between target and probe), `frequency`, `source`. `manipulation` checks that each parameter
+moves its property (same entity, same key, same value, same instant, after the valid time,
+newer than the target, mean cosine to the query, copies).
+
+**Observation** (per retrieval): best rank of the target (or a derived memory covering it
+and stating its value), the L1 target's own rank, whether a hard filter removed it, the
+roles of the top-k, top-1 entity, key and value, rival values in the top-k, entropy of the
+top-k final scores (all positive), derived memories merging the target with a distractor,
+and three confusions — temporal (top-1 states another value for the key), entity (top-1 is
+about another entity), provenance (top-1 states the target's value but is not its
+evidence).
+
+**Load curves** (per mechanism and policy; replicates are independent populations, so
+pairs are independent units; each load is paired with load 0 of the same replicate):
+target@1, target@k, distractor@1, the confusions, contradiction exposure, exclusion, rank
+displacement and reciprocal-rank degradation (paired mean, Student-t interval, sign test,
+d_z), mean entropy, the Newcombe difference in target@1 with exact McNemar and Holm across
+loads, and the RQ-I3 decomposition: baseline failures (already failing at load 0: retrieval
+failure), interference failures (displaced by a labelled distractor), other failures. A
+load is `degraded` only when the Holm-adjusted test is significant and not underpowered;
+`onset` is the smallest such load in the tested design, not a universal threshold. False
+merges: resolution decisions joining the target with another true entity, per policy.
+
+### 4.16 Phase 8–10 laboratory methodology
+
+`memory_lab` runs eight generated worlds (stable, rapid, contradictory, many-entities with
+near-collision names, overlap, source-noise, long, adversarial) through six systems — base
+(mixed retrieval), consolidated (Phase 7 hierarchical), graph, forgetting (validity rule),
+interference (injected distractors: near-collision notes, same-entity other-attribute
+facts, same-key rivals, other-entity same-attribute facts; truth unchanged, I20), and
+combined — plus a ladder that adds one variable at a time under interference, and
+ablations on three worlds (graph signals, entity resolution, every forgetting rule,
+consolidation under the graph, temporal filtering, provenance semantics, interference
+type). Single-variable comparisons go through `evaluation.compare`; comparisons that change
+several variables are *composite* and labelled. Beyond the probe-level paired analysis
+(which treats probes as independent), a key-level analysis averages each key's probes and
+compares keys (paired t, sign test, d_z), because probes about one key share memory. The
+structure study stores and verifies one graph per world; the interference study runs
+outside the manifest runner (traces are recomputed on replay and compared by digest, not
+stored); interaction experiments intervene on one designed world each and report observed
+effects, not universal causal claims.
+
 ## 5. Module Boundaries
 
 The dependency rule is strict: **dependencies point inward toward `core`**. `core` imports
@@ -754,7 +1024,13 @@ hybrid        corpus, generators, filters, signals, policies, explainable traces
 hybrid_eval   hybrid benchmarks, ablations, counterfactuals, paired statistics  (exists)
 consolidation derived memory: grouping, guards, timelines, abstraction, importance, loss  (exists)
 consolidation_eval  consolidation lab: strategies, stability-plasticity, demonstration  (exists)
-provenance    autopsy / provenance graph (NetworkX)
+entities      conservative entity resolution: mentions, decisions, entities  (exists)
+graph         semantic memory graph: claims, snapshots, diffs, analytics, diagnostics,
+              retrieval view, provenance traversal  (exists)
+forgetting    forgetting policies, availability records, cascade, measurements  (exists)
+interference  controlled interference populations, observations, load curves  (exists)
+memory_lab    Phase 8-10 matrix, structure/interference/interaction studies, demonstration  (exists)
+autopsy       Phase 17: autopsy records over graph.trace_provenance
 api           FastAPI surface over the above (no logic of its own)
 observatory   interactive visualisation (consumes api only)
 reports       evidence-backed reports generated from stored runs
@@ -773,9 +1049,9 @@ sources, and every experiment reproduces from its manifest.
 | L3 Consolidation | candidate → validation → deduplication → merging → abstraction → durable memory, with lineage to every supporting experience | L1, L2, L5 | 7 ✓ |
 | L4 Hybrid retrieval | Decomposed signals (lexical, semantic, temporal, recency, reliability, confidence, provenance, contradiction, diversity), rerankers, adaptive policies | `retrieval` signals and traces | 2 ✓, 6 ✓, 13 |
 | L5 Semantic memory | Local embedders and indexes as artifacts | `artifacts`, `core` states | 5 ✓ |
-| L6 Memory graph | Provenance and semantic graph with snapshots | all records | 8 |
-| L7 Forgetting lab | Forgetting mechanisms as policies and interventions; nothing deleted | history, interventions | 9 |
-| L8 Interference lab | Controlled similarity, density and repetition | L4, L5, datasets | 10 |
+| L6 Memory graph | Provenance and semantic graph with snapshots | all records | 8 ✓ |
+| L7 Forgetting lab | Forgetting mechanisms as policies and interventions; nothing deleted | history, interventions | 9 ✓ |
+| L8 Interference lab | Controlled similarity, density and repetition | L4, L5, datasets | 10 ✓ |
 | L9 Belief dynamics | Competing claims and revision | `taxonomy` relations | 4 ✓ (relations), 11 |
 | L10 Source and trust | Source identity and reliability, independent of content | experiences | 12 |
 | L11 Uncertainty | Separate memory, retrieval and response confidence; calibration | L4, evaluation | 12 |
@@ -803,6 +1079,8 @@ introduced **when the first implementation is written** (not as empty scaffoldin
   `Registry.extend(embedders=...)`; `neural.neural_embedders()` provides the neural entry.
 - `neural.TransformerBackend` — tokeniser plus encoder under the neural adapter (exists:
   `OnnxBackend`)
+- `hybrid.GraphView` — what graph signals and the graph generator read (exists:
+  `graph.MemoryGraph`)
 - `hybrid.SIGNALS` — hybrid signal definitions (name, version, direction, range, parameter
   check, extractor); `hybrid.GeneratorSpec` names the candidate generators. A new signal is
   a registry entry plus its tests; policies refer to it by name (I40).
@@ -833,6 +1111,11 @@ runner**, only a new implementation and its registration in a manifest.
   against the spec's pinned sizes and SHA-256 digests before use.
 - **Approximate indexes**: serialised FAISS indexes (kind `HnswIndex`), referenced by
   the `IndexManifest`.
+- **Graph snapshots** (`GraphSnapshot`, `GraphDiff`, `ProvenanceTrace`): records in the
+  artifact store when a study stores them; in runs, one digest per probe in the trace and
+  the run record, rebuilt from the log (I67).
+- **Forgetting records** (`ForgettingRecord`, `ForgettingMetrics`): records in the artifact
+  store, one per probe of a run with a forgetting policy. The log is never touched (I61).
 - **Semantic indexes**: an `IndexManifest` record, its source `MemoryState` record,
   and a raw vector blob (kind `IndexVectors`, little-endian float32, row-major), all in
   the artifact store.
@@ -850,7 +1133,8 @@ The research loop (§1.1), executed by the experiment layer:
 
 ```
 dataset → interventions → formation (→ consolidation) → memory state (→ index)
-  → retrieval → response → evaluation → comparison → longitudinal analysis → autopsy
+  (→ forgetting: availability) (→ graph) → retrieval → response → evaluation → comparison
+  → longitudinal analysis → autopsy
 ```
 
 Every arrow is a recorded, replayable transformation; bracketed steps are roadmap.
@@ -871,9 +1155,9 @@ deferrals — is in [ROADMAP.md](ROADMAP.md).
 | 5 ✓ | Semantic memory and local embedding infrastructure | Index rebuilds reproduce vectors; neighbours trace to versions; core runs without neural deps |
 | 6 ✓ | Hybrid retrieval and explainable ranking | Rank reproducible from trace; policies compared with paired statistics |
 | 7 ✓ | Memory consolidation and abstraction | Every consolidated memory has lineage to all supporting experiences |
-| 8 | Provenance and semantic memory graph | Graph is a pure, reproducible function of stored artifacts |
-| 9 | Forgetting laboratory | Every forgotten memory reconstructible; retention measured with intervals |
-| 10 | Interference laboratory | Each generator parameter measurably moves its target property |
+| 8 ✓ | Provenance and semantic memory graph | Graph is a pure, reproducible function of stored artifacts |
+| 9 ✓ | Forgetting laboratory | Every forgotten memory reconstructible; retention measured with intervals |
+| 10 ✓ | Interference laboratory | Each generator parameter measurably moves its target property |
 | 11 | Contradiction and belief revision | Revision measured without equating newer with truer; collateral damage measured |
 | 12 | Source reliability and uncertainty | Separate, calibrated confidence components; no universal score |
 | 13 | Adaptive retrieval policies | Every adaptation a replayable event |
@@ -966,3 +1250,24 @@ deferrals — is in [ROADMAP.md](ROADMAP.md).
 | 2026-09-27 | Co-change patterns are inferred, carry no claim, and are scored against designed couplings. | The brief's "correlation becomes fact" failure is made measurable instead of possible. |
 | 2026-09-27 | Importance has no access-frequency component. | MEMORIA has no retrieval-feedback events before Phase 13; inventing them would be unfounded evidence. |
 | 2026-09-27 | Three existing tests were changed: the run-record field set (in two tests) now includes the evolved `hierarchies`, the hybrid signal registry includes `support`, and the v2 manifest tests carry typing-only `type: ignore`s for the now-optional `retriever`. | Each asserts a shape that grew additively; the digest guarantees they protect are tested unchanged (and the v2 shape test now also asserts `hierarchies` is omitted when empty). |
+| 2026-09-28 | Phases 8, 9 and 10 are implemented as one super-phase (graph, forgetting, interference). | Their interactions (forgetting a source leaves graph claims unsupported; consolidation changes competition) are the object of study and need all three in one experiment identity. |
+| 2026-09-28 | The graph is a derived, content-addressed snapshot built with the standard library. Rejected: NetworkX (the roadmap's option). | A second library object model would be a second, non-canonical source of truth; canonical records, sorted edges and a rebuild check make the graph auditable, and ~1,600 nodes need no graph library. |
+| 2026-09-28 | One entity node per mention, joined by `same-entity` edges for accepted decisions. Rejected: merging mentions into one node. | A merge must stay visible, explainable and reversible in the graph itself; a false merge is then an edge that can be counted and removed. |
+| 2026-09-28 | Events are the Phase 7 timeline periods; event ids include the period's flags and evidence. | Found while testing: a contested rival period that a later correction retracts can share key, value and start with the period the correction asserts, and the first id scheme collided. |
+| 2026-09-28 | No claims for free text; inferred `value-mention` links instead. Rejected: pattern-based extraction ("X lives in Y" → claim). | A regex extractor would fabricate structure and cannot see negation; a co-mention labelled inferred is honest, and its failure (negated notes) is tested and measured. |
+| 2026-09-28 | Claims carry support and dispute counts, not a confidence score. | Calibrated confidence is Phase 12; an invented number would be a universal score by the back door. |
+| 2026-09-28 | Resolution confidence is a declared per-rule prior in the policy. | The brief asks for confidence-bearing decisions; a prior stated as such is auditable, a computed "probability" would not be. |
+| 2026-09-28 | Runs record graph snapshots by digest, one per probe, and rebuild them. Rejected: storing every snapshot. | A snapshot is ~2 MB and a run has 30–60 probes; graphs are derived indexes (§6), a rebuild takes ~0.1 s, and reproduction compares the digests. The structure study stores one snapshot per world. |
+| 2026-09-28 | Forgetting is availability decided per probe at `known_at`, never a log operation. Rejected: FORGET tombstones (a recorded belief change, and it would rewrite runs' history); dataset `drop` (changes the input, not the memory); periodic checkpoints (decisions would not cover memories recorded since). | History must stay the scientific record (I7, I61); the probe-time decision is exact for the corpus it governs. |
+| 2026-09-28 | Soft suppression is a signal (`suppression`, direction −1). Rejected: a hidden penalty stage. | Every influence on a ranking must be a recorded, explained contribution (I43). |
+| 2026-09-28 | Derived memories cascade by default; `retain` is an explicit, measured alternative. | The brief: a derived memory must not stay active on invalid evidence unless a policy permits it. |
+| 2026-09-28 | Access history is the run's own earlier traces. Rejected: synthetic access counts. | Phase 13 feedback events do not exist yet; the traces are recorded evidence, and I64 keeps them in the past. |
+| 2026-09-28 | Graph and forgetting enter manifests as schema v4 evolved fields; the graph policy belongs to the "retrieval" variable, forgetting is its own variable. | Only graph signals and the graph generator read the graph (like a representation); every v1–v3 digest is unchanged (existing golden tests). |
+| 2026-09-28 | The interference study runs outside the manifest runner, with traces recomputed on replay and compared by digest. | ~12,000 retrievals; storing each trace would cost gigabytes, while replay proves them identical. |
+| 2026-09-28 | Interference is defined against a load-0 baseline on the same replicate; replicates are independent populations. | A failure is interference only relative to a controlled baseline (RQ-I3); independent replicates make paired tests valid. |
+| 2026-09-28 | Semantic distractors use near-collision names (the target's first two syllables). | Found while piloting: unrelated names never competed with a query that names its entity, so the mechanism was not being tested. |
+| 2026-09-28 | World interference injects four kinds including same-key rivals. | Found while piloting: without them no injected memory ever answered a probe, which says only that key-aware retrieval ignores other keys. |
+| 2026-09-28 | Student's t via the regularised incomplete beta (continued fraction) and bisection. Rejected: SciPy. | No new dependency for one distribution; quantiles match reference values to 1e-9 (tested). |
+| 2026-09-28 | Key-level (cluster) analysis beside probe-level McNemar; comparisons changing several variables are labelled composite. | Probes about one key share memory (the Phase 4 caveat), and a multi-variable change cannot be attributed to one variable (I27). |
+| 2026-09-28 | `scenarios._ENTITIES` gains five names, including the near-collisions "Anna" and "Benn". | Worlds with more entities; every existing world uses at most five, so its seeded choices and digests are unchanged. |
+| 2026-09-28 | Three existing tests were changed: the hybrid signal registry includes `suppression` and the three graph signals, and two run-record shape tests include the evolved `graphs` and `forgetting` (and assert they are omitted when empty). | Each asserts a shape that grew additively; digests they protect are pinned by unchanged golden tests. |

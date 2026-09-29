@@ -157,3 +157,123 @@ class Proportion(Record):
         if (self.estimate, self.low, self.high) != derived:
             raise ValueError("estimate or interval does not follow from the counts")
         return self
+
+
+# --- paired continuous differences ---------------------------------------------------------
+
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued fraction of the regularised incomplete beta (modified Lentz)."""
+    tiny, eps = 1e-300, 3e-16
+    c, d = 1.0, 1.0 - (a + b) * x / (a + 1)
+    d = 1 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 400):
+        m2 = 2 * m
+        for num in (
+            m * (b - m) * x / ((a + m2 - 1) * (a + m2)),
+            -(a + m) * (a + b + m) * x / ((a + m2) * (a + m2 + 1)),
+        ):
+            d = 1 + num * d
+            d = 1 / (d if abs(d) > tiny else tiny)
+            c = 1 + num / c
+            c = c if abs(c) > tiny else tiny
+            h *= d * c
+        if abs(d * c - 1) < eps:
+            return h
+    raise ArithmeticError("incomplete beta did not converge")
+
+
+def _betainc(a: float, b: float, x: float) -> float:
+    if x <= 0:
+        return 0.0
+    if x >= 1:
+        return 1.0
+    ln = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x)
+    ln += b * math.log1p(-x)
+    if x < (a + 1) / (a + b + 2):
+        return math.exp(ln) * _betacf(a, b, x) / a
+    return 1 - math.exp(ln) * _betacf(b, a, 1 - x) / b
+
+
+def t_cdf(t: float, df: int) -> float:
+    """Student's t distribution function (via the regularised incomplete beta)."""
+    tail = 0.5 * _betainc(df / 2, 0.5, df / (df + t * t))
+    return 1 - tail if t >= 0 else tail
+
+
+def t_quantile(p: float, df: int) -> float:
+    """Inverse of :func:`t_cdf` by bisection (deterministic; |error| < 1e-12)."""
+    if not 0 < p < 1 or df < 1:
+        raise ValueError("need 0 < p < 1 and df >= 1")
+    lo, hi = -1e4, 1e4
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        if t_cdf(mid, df) < p:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+class PairedMean(Record):
+    """Mean of paired differences (treatment - baseline) over n independent units, with a
+    Student-t interval, an exact two-sided sign test on the non-zero differences, and the
+    standardised effect d_z = mean / sd. ``None`` when undefined (n < 2 or sd = 0)."""
+
+    n: int = Field(ge=0)
+    mean: float | None
+    low: float | None
+    high: float | None
+    positive: int = Field(ge=0)
+    negative: int = Field(ge=0)
+    sign_p: float
+    d_z: float | None
+    underpowered: bool  # the sign test could not reach alpha with this many non-zero pairs
+
+
+def paired_mean(diffs: list[float], confidence: float, alpha: float = 0.05) -> PairedMean:
+    n = len(diffs)
+    pos = sum(1 for d in diffs if d > 0)
+    neg = sum(1 for d in diffs if d < 0)
+    p = significant(mcnemar_exact(pos, neg))
+    under = min_achievable_p(pos + neg) > alpha
+    if n < 2:
+        mean = quantize(math.fsum(diffs) / n) if n else None
+        return PairedMean(
+            n=n,
+            mean=mean,
+            low=None,
+            high=None,
+            positive=pos,
+            negative=neg,
+            sign_p=p,
+            d_z=None,
+            underpowered=under,
+        )
+    mean = math.fsum(diffs) / n
+    sd = math.sqrt(math.fsum((d - mean) ** 2 for d in diffs) / (n - 1))
+    if sd == 0:
+        return PairedMean(
+            n=n,
+            mean=quantize(mean),
+            low=quantize(mean),
+            high=quantize(mean),
+            positive=pos,
+            negative=neg,
+            sign_p=p,
+            d_z=None,
+            underpowered=under,
+        )
+    half = t_quantile(1 - (1 - confidence) / 2, n - 1) * sd / math.sqrt(n)
+    return PairedMean(
+        n=n,
+        mean=quantize(mean),
+        low=quantize(mean - half),
+        high=quantize(mean + half),
+        positive=pos,
+        negative=neg,
+        sign_p=p,
+        d_z=quantize(mean / sd),
+        underpowered=under,
+    )
