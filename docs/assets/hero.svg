@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" width="1200" height="320" role="img" aria-labelledby="t d">
+<title id="t">MEMORIA</title><desc id="d">Project banner: MEMORIA, Long-Horizon Memory Intelligence and Reliability Observatory, beside a timeline of superseded and current memory versions.</desc>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8fa3c4"/></marker>
+<marker id="w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#fbbf24"/></marker></defs>
+<rect width="1200" height="320" rx="14" fill="#0b1220"/>
+<text x="60" y="118" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="64" font-weight="700" fill="#e6edf7" text-anchor="start" letter-spacing="6">MEMORIA</text>
+<text x="62" y="158" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" font-weight="500" fill="#5eead4" text-anchor="start" >Long-Horizon Memory Intelligence &amp; Reliability Observatory</text>
+<text x="62" y="192" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="400" fill="#8fa3c4" text-anchor="start" >A reproducible laboratory for studying what happens to an AI system&#x27;s memory</text>
+<text x="62" y="214" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="400" fill="#8fa3c4" text-anchor="start" >as experiences accumulate, change, conflict and disappear.</text>
+<text x="700" y="70" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="400" fill="#8fa3c4" text-anchor="start" >ana.home  ·  memory versions over time (illustrative)</text>
+<line x1="700" y1="200" x2="1140" y2="200" stroke="#2a3a5c" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="1140" y="222" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="400" fill="#8fa3c4" text-anchor="end" >time</text>
+<rect x="685" y="110" width="90" height="56" rx="8" fill="#111a2e" stroke="#2a3a5c" stroke-width="1.2" stroke-dasharray="5 4"/>
+<text x="730" y="131" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#8fa3c4" text-anchor="middle" >Lyon</text>
+<text x="730" y="150" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="400" fill="#8fa3c4" text-anchor="middle" >v0 · superseded</text>
+<line x1="730" y1="166" x2="730" y2="200" stroke="#2a3a5c" stroke-width="1"/><circle cx="730" cy="200" r="4" fill="#8fa3c4"/>
+<rect x="825" y="110" width="90" height="56" rx="8" fill="#111a2e" stroke="#2a3a5c" stroke-width="1.2" stroke-dasharray="5 4"/>
+<text x="870" y="131" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#8fa3c4" text-anchor="middle" >Paris</text>
+<text x="870" y="150" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="400" fill="#8fa3c4" text-anchor="middle" >v1 · superseded</text>
+<line x1="870" y1="166" x2="870" y2="200" stroke="#2a3a5c" stroke-width="1"/><circle cx="870" cy="200" r="4" fill="#8fa3c4"/>
+<path d="M777 138 L823 138" fill="none" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="965" y="100" width="90" height="56" rx="8" fill="#111a2e" stroke="#5eead4" stroke-width="1.8"/>
+<text x="1010" y="121" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf7" text-anchor="middle" >Berlin</text>
+<text x="1010" y="140" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="400" fill="#8fa3c4" text-anchor="middle" >v2 · current</text>
+<line x1="1010" y1="156" x2="1010" y2="200" stroke="#2a3a5c" stroke-width="1"/><circle cx="1010" cy="200" r="4" fill="#5eead4"/>
+<path d="M917 138 L963 138" fill="none" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="940" y="262" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400" fill="#8fa3c4" text-anchor="middle" >append-only · content-addressed · never overwritten</text>
+<line x1="60" y1="252" x2="640" y2="252" stroke="#2a3a5c"/>
+<text x="60" y="280" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13.5" font-weight="400" fill="#8fa3c4" text-anchor="start" >provenance  ·  replay  ·  autopsy  ·  paired statistics with uncertainty</text>
+</svg>

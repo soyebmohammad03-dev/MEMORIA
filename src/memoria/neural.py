@@ -76,6 +76,17 @@ class ModelCard(Record):
     description: str
 
 
+def _check_file(path: Path, f: ModelFile) -> None:
+    if path.stat().st_size != f.size:
+        raise ModelIntegrityError(f"{f.path}: size {path.stat().st_size}, pinned {f.size}")
+    h = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            h.update(chunk)
+    if h.hexdigest() != f.sha256:
+        raise ModelIntegrityError(f"{f.path}: sha256 {h.hexdigest()}, pinned {f.sha256}")
+
+
 def verify_files(model_dir: Path, identity: ModelIdentity) -> None:
     """Every pinned file must exist with the pinned size and SHA-256."""
     for f in identity.files:
@@ -85,14 +96,7 @@ def verify_files(model_dir: Path, identity: ModelIdentity) -> None:
                 f"{identity.id}@{identity.revision}: missing {f.path} in {model_dir} "
                 "(fetch it explicitly with memoria.neural.fetch_model)"
             )
-        if path.stat().st_size != f.size:
-            raise ModelIntegrityError(f"{f.path}: size {path.stat().st_size}, pinned {f.size}")
-        h = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1 << 20), b""):
-                h.update(chunk)
-        if h.hexdigest() != f.sha256:
-            raise ModelIntegrityError(f"{f.path}: sha256 {h.hexdigest()}, pinned {f.sha256}")
+        _check_file(path, f)
 
 
 class OnnxBackend:
@@ -292,6 +296,11 @@ def fetch_model(identity: ModelIdentity, model_dir: Path) -> Path:
         with urllib.request.urlopen(url, timeout=600) as response, partial.open("wb") as out:
             for chunk in iter(lambda: response.read(1 << 20), b""):
                 out.write(chunk)
+        try:
+            _check_file(partial, f)  # a corrupt download must never become the pinned file
+        except ModelIntegrityError:
+            partial.unlink()
+            raise
         partial.replace(target)
     verify_files(model_dir, identity)
     return model_dir

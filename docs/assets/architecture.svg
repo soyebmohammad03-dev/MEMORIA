@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1090 654" width="1090" height="654" role="img" aria-labelledby="t d">
+<title id="t">MEMORIA architecture</title><desc id="d">Eight layers from substrate to analysis; dependencies point inward toward core.</desc>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8fa3c4"/></marker>
+<marker id="w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#fbbf24"/></marker></defs>
+<rect width="1090" height="654" rx="14" fill="#0b1220"/>
+<text x="40" y="44" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="700" fill="#e6edf7" text-anchor="start" >Architecture: layers, grouped by research phase</text>
+<text x="40" y="66" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#8fa3c4" text-anchor="start" >`core` imports nothing from MEMORIA; the experiment runner composes higher layers by name. Derived layers are never evidence.</text>
+<rect x="40" y="92" width="1010" height="52" rx="8" fill="#111a2e" stroke="#2a3a5c" stroke-width="1.2"/>
+<text x="60" y="123" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf7" text-anchor="start" >Substrate</text>
+<text x="300" y="123" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400" fill="#8fa3c4" text-anchor="start" >core · store · formation · retrieval · artifacts</text>
+<line x1="545" y1="145" x2="545" y2="155" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="40" y="156" width="1010" height="52" rx="8" fill="#111a2e" stroke="#2a3a5c" stroke-width="1.2"/>
+<text x="60" y="187" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf7" text-anchor="start" >Experiments &amp; evaluation</text>
+<text x="300" y="187" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400" fill="#8fa3c4" text-anchor="start" >experiments · interventions · scenarios · comparison · taxonomy · statistics · evaluation</text>
+<line x1="545" y1="209" x2="545" y2="219" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="40" y="220" width="1010" height="52" rx="8" fill="#111a2e" stroke="#2a3a5c" stroke-width="1.2"/>
+<text x="60" y="251" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf7" text-anchor="start" >Representation</text>
+<text x="300" y="251" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400" fill="#8fa3c4" text-anchor="start" >embeddings · neural (extra) · vectors (extra) · semantic · hybrid</text>
+<line x1="545" y1="273" x2="545" y2="283" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="40" y="284" width="1010" height="52" rx="8" fill="#111a2e" stroke="#2a3a5c" stroke-width="1.2"/>
+<text x="60" y="315" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf7" text-anchor="start" >Derived memory</text>
+<text x="300" y="315" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400" fill="#8fa3c4" text-anchor="start" >consolidation · entities · graph · identity · claims</text>
+<line x1="545" y1="337" x2="545" y2="347" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="40" y="348" width="1010" height="52" rx="8" fill="#111a2e" stroke="#2a3a5c" stroke-width="1.2"/>
+<text x="60" y="379" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf7" text-anchor="start" >Degradation</text>
+<text x="300" y="379" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400" fill="#8fa3c4" text-anchor="start" >forgetting · interference · memory_lab</text>
+<line x1="545" y1="401" x2="545" y2="411" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="40" y="412" width="1010" height="52" rx="8" fill="#111a2e" stroke="#2a3a5c" stroke-width="1.2"/>
+<text x="60" y="443" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf7" text-anchor="start" >Belief &amp; uncertainty</text>
+<text x="300" y="443" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400" fill="#8fa3c4" text-anchor="start" >sources · contradictions · beliefs · revision · calibration · belief_*</text>
+<line x1="545" y1="465" x2="545" y2="475" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="40" y="476" width="1010" height="52" rx="8" fill="#111a2e" stroke="#2a3a5c" stroke-width="1.2"/>
+<text x="60" y="507" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf7" text-anchor="start" >Adaptive memory</text>
+<text x="300" y="507" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400" fill="#8fa3c4" text-anchor="start" >adaptive · retention · adaptive_*</text>
+<line x1="545" y1="529" x2="545" y2="539" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="40" y="540" width="1010" height="52" rx="8" fill="#111a2e" stroke="#5eead4" stroke-width="1.6"/>
+<text x="60" y="571" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf7" text-anchor="start" >Analysis</text>
+<text x="300" y="571" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400" fill="#8fa3c4" text-anchor="start" >autopsy · benchmark · lifecycle_demo</text>
+<line x1="40" y1="608" x2="1050" y2="608" stroke="#2a3a5c"/>
+<text x="40" y="634" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="400" fill="#8fa3c4" text-anchor="start" >Everything rests on: content-addressed records (SHA-256 over canonical JSON) · append-only bitemporal log · write-once artifact store</text>
+</svg>

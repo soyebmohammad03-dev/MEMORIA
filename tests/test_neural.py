@@ -29,6 +29,7 @@ from memoria.neural import (
     NeuralSentenceEmbedder,
     Tokens,
     default_model_dir,
+    fetch_model,
     minilm_spec,
     neural_embedders,
     verify_files,
@@ -192,6 +193,23 @@ def fake_model(tmp_path: Path, data: bytes = b"weights") -> ModelIdentity:
         revision="1",
         files=(ModelFile(path="model.bin", sha256=hashlib.sha256(b"weights").hexdigest(), size=7),),
     )
+
+
+def test_fetch_rejects_a_corrupt_download_without_keeping_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import io
+    import urllib.request
+
+    (tmp_path / "src").mkdir()
+    identity = fake_model(tmp_path / "src").model_copy(update={"provider": "huggingface"})
+    target = tmp_path / "dst"
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: io.BytesIO(b"weightz"))
+    with pytest.raises(ModelIntegrityError):
+        fetch_model(identity, target)
+    assert not list(target.iterdir())  # neither the file nor a partial download survives
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: io.BytesIO(b"weights"))
+    assert fetch_model(identity, target) == target  # a retry now succeeds
 
 
 def test_file_verification(tmp_path: Path) -> None:

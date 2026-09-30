@@ -1,0 +1,15 @@
+name: Research question or methodology concern
+description: A statistical, methodological or experimental-design issue, or a proposed study.
+labels: [research]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: The question or concern
+      description: Which claim, statistic or design choice, and why it may not hold.
+    validations: {required: true}
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: A report section, artifact digest, test, or reference.

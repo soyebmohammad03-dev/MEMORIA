@@ -1,0 +1,31 @@
+name: Bug report
+description: Something behaves incorrectly (wrong result, broken determinism, crash).
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations: {required: true}
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: A command or short script, with the seed or manifest if relevant.
+      render: shell
+    validations: {required: true}
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "Python 3.12, macOS arm64, commit abc1234, extras: none"
+    validations: {required: true}
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - Crash or wrong output
+        - Non-determinism or digest mismatch
+        - Provenance, replay or autopsy inconsistency
+        - Documentation contradicts behaviour

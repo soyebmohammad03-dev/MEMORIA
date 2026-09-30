@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 400" width="1280" height="400" role="img" aria-labelledby="t d">
+<title id="t">Autopsy, replay and counterfactual flow</title><desc id="d">Evidence chain of an answer at a cutoff, with replay, verification by rebuild and counterfactual analysis.</desc>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8fa3c4"/></marker>
+<marker id="w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#fbbf24"/></marker></defs>
+<rect width="1280" height="400" rx="14" fill="#0b1220"/>
+<text x="40" y="44" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="700" fill="#e6edf7" text-anchor="start" >Memory autopsy, temporal replay and counterfactuals</text>
+<text x="40" y="66" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#8fa3c4" text-anchor="start" >An answer is explained by rebuilding it from records available at the cutoff, then verified against the live run.</text>
+<rect x="40" y="120" width="86" height="40" rx="7" fill="#111a2e" stroke="#2a3a5c"/>
+<text x="83.0" y="145" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" font-weight="400" fill="#e6edf7" text-anchor="middle" >answer</text>
+<line x1="127" y1="140" x2="133" y2="140" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="134" y="120" width="86" height="40" rx="7" fill="#111a2e" stroke="#2a3a5c"/>
+<text x="177.0" y="145" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" font-weight="400" fill="#e6edf7" text-anchor="middle" >decision</text>
+<line x1="221" y1="140" x2="227" y2="140" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="228" y="120" width="86" height="40" rx="7" fill="#111a2e" stroke="#2a3a5c"/>
+<text x="271.0" y="145" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" font-weight="400" fill="#e6edf7" text-anchor="middle" >candidates</text>
+<line x1="315" y1="140" x2="321" y2="140" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="322" y="120" width="86" height="40" rx="7" fill="#111a2e" stroke="#2a3a5c"/>
+<text x="365.0" y="145" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" font-weight="400" fill="#e6edf7" text-anchor="middle" >policy</text>
+<line x1="409" y1="140" x2="415" y2="140" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="416" y="120" width="86" height="40" rx="7" fill="#111a2e" stroke="#2a3a5c"/>
+<text x="459.0" y="145" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" font-weight="400" fill="#e6edf7" text-anchor="middle" >signals</text>
+<line x1="503" y1="140" x2="509" y2="140" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="510" y="120" width="86" height="40" rx="7" fill="#111a2e" stroke="#2a3a5c"/>
+<text x="553.0" y="145" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" font-weight="400" fill="#e6edf7" text-anchor="middle" >selected</text>
+<line x1="597" y1="140" x2="603" y2="140" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="604" y="120" width="86" height="40" rx="7" fill="#111a2e" stroke="#2a3a5c"/>
+<text x="647.0" y="145" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" font-weight="400" fill="#e6edf7" text-anchor="middle" >state</text>
+<line x1="691" y1="140" x2="697" y2="140" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="698" y="120" width="86" height="40" rx="7" fill="#111a2e" stroke="#2a3a5c"/>
+<text x="741.0" y="145" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" font-weight="400" fill="#e6edf7" text-anchor="middle" >resolution</text>
+<line x1="785" y1="140" x2="791" y2="140" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="792" y="120" width="86" height="40" rx="7" fill="#111a2e" stroke="#2a3a5c"/>
+<text x="835.0" y="145" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" font-weight="400" fill="#e6edf7" text-anchor="middle" >experience</text>
+<line x1="879" y1="140" x2="885" y2="140" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="886" y="120" width="86" height="40" rx="7" fill="#111a2e" stroke="#2a3a5c"/>
+<text x="929.0" y="145" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" font-weight="400" fill="#e6edf7" text-anchor="middle" >source</text>
+<line x1="973" y1="140" x2="979" y2="140" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="980" y="120" width="86" height="40" rx="7" fill="#111a2e" stroke="#2a3a5c"/>
+<text x="1023.0" y="145" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" font-weight="400" fill="#e6edf7" text-anchor="middle" >validity</text>
+<line x1="1067" y1="140" x2="1073" y2="140" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="1074" y="120" width="86" height="40" rx="7" fill="#111a2e" stroke="#2a3a5c"/>
+<text x="1117.0" y="145" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" font-weight="400" fill="#e6edf7" text-anchor="middle" >corrections</text>
+<line x1="1161" y1="140" x2="1167" y2="140" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="1168" y="120" width="86" height="40" rx="7" fill="#111a2e" stroke="#2a3a5c"/>
+<text x="1211.0" y="145" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" font-weight="400" fill="#e6edf7" text-anchor="middle" >contradictions</text>
+<text x="40" y="104" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="400" fill="#5eead4" text-anchor="start" >evidence chain at the cutoff  (each link: found · missing · not applicable)</text>
+<line x1="40" y1="200" x2="1240" y2="200" stroke="#2a3a5c" stroke-width="1.5"/>
+<line x1="640" y1="182" x2="640" y2="330" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="5 4"/>
+<text x="646" y="178" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400" fill="#fbbf24" text-anchor="start" >decision cutoff</text>
+<text x="60" y="222" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400" fill="#8fa3c4" text-anchor="start" >visible to the decision</text>
+<text x="660" y="222" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400" fill="#fbbf24" text-anchor="start" >after_cutoff: recorded, never seen by the decision</text>
+<rect x="60" y="250" width="240" height="60" rx="8" fill="#111a2e" stroke="#5eead4" stroke-width="1.6"/><text x="180.0" y="277.0" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e6edf7" text-anchor="middle" >Replay</text><text x="180.0" y="296.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="400" fill="#8fa3c4" text-anchor="middle" >EventLedger.copy() at cutoff</text>
+<rect x="340" y="250" width="240" height="60" rx="8" fill="#111a2e" stroke="#5eead4" stroke-width="1.6"/><text x="460.0" y="277.0" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e6edf7" text-anchor="middle" >Rebuild &amp; verify</text><text x="460.0" y="296.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="400" fill="#8fa3c4" text-anchor="middle" >autopsy digest == stored</text>
+<rect x="680" y="250" width="250" height="60" rx="8" fill="#111a2e" stroke="#2a3a5c" stroke-width="1.2"/><text x="805.0" y="277.0" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e6edf7" text-anchor="middle" >Counterfactual</text><text x="805.0" y="296.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="400" fill="#8fa3c4" text-anchor="middle" >alternative config, evidence fixed</text>
+<rect x="970" y="250" width="250" height="60" rx="8" fill="#111a2e" stroke="#2a3a5c" stroke-width="1.2"/><text x="1095.0" y="277.0" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e6edf7" text-anchor="middle" >Re-simulation</text><text x="1095.0" y="296.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="400" fill="#8fa3c4" text-anchor="middle" >feedback loop differs: reported</text>
+<line x1="300" y1="280" x2="338" y2="280" stroke="#8fa3c4" stroke-width="1.5" marker-end="url(#a)"/>
+<line x1="930" y1="280" x2="968" y2="280" stroke="#8fa3c4" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#a)"/>
+<text x="40" y="350" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="400" fill="#8fa3c4" text-anchor="start" >Missing provenance is reported as missing, never filled in. Counterfactuals on fixed evidence are decision-level recomputations, not causal estimates.</text>
+<text x="40" y="372" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="400" fill="#8fa3c4" text-anchor="start" >Hidden ground truth appears only in `analysis`, outside the chain, so the explanation cannot be circular.</text>
+</svg>

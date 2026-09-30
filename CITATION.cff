@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use MEMORIA in your research, please cite it as below."
+title: "MEMORIA: Long-Horizon Memory Intelligence & Reliability Observatory"
+type: software
+version: 0.1.0
+date-released: 2026-09-30
+license: MIT
+repository-code: "https://github.com/soyebmohammad03-dev/MEMORIA"
+authors:
+  - family-names: Mohammad
+    given-names: Soyeb
+abstract: >-
+  MEMORIA is a reproducible laboratory for studying artificial memory over long interaction
+  horizons: formation, retrieval, consolidation, forgetting, interference, contradiction and
+  belief revision, calibrated uncertainty, adaptive importance, replay and provenance-based
+  autopsy. Memory systems are the subject of controlled experiments on generated worlds, with
+  content-addressed records, paired statistics and reproduction from manifests.
+keywords:
+  - artificial memory
+  - long-horizon agents
+  - belief revision
+  - calibration
+  - provenance
+  - reproducibility
+  - retrieval
+  - forgetting

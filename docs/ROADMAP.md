@@ -22,6 +22,17 @@ retention dynamics, free-text claims and entity identity;
 feedback part of Phase 13 and the retention curves of Phase 16 on generated worlds; what remains
 of those phases is listed in their sections.
 
+## Release status (v0.1.0)
+
+| Status | Phases |
+|---|---|
+| Complete | 1–4 (substrate), 5, 6, 7, 8–10, 11–12 |
+| Partly delivered | 13 (adaptive importance and feedback, not adaptive policies inside hybrid retrieval), 16 (retention curves on generated worlds), 17 (autopsy of memory answers and beliefs, not of hybrid traces) |
+| Not started | 14 (contamination and adversarial sources), 15 (parameterised benchmark generator), 18 (sweeps), 19 (advanced statistics), 20 (API and observatory), 21 (research bundles), 22 (final pre-registered study) |
+
+The Super-Phase 6 benchmark is a multi-seed study over five fixed environments; it is not the
+Phase 22 study. The scientific implementation is frozen at this release apart from defects.
+
 ---
 
 ## Phase 5 — Semantic memory and local embedding infrastructure (L5)

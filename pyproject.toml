@@ -1,6 +1,6 @@
 [project]
 name = "memoria"
-version = "0.0.0"
+version = "0.1.0"
 description = "Long-Horizon Memory Intelligence & Reliability Observatory: an experimental platform for studying AI memory over time."
 readme = "README.md"
 license = "MIT"

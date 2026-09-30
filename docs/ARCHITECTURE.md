@@ -1179,8 +1179,14 @@ counterfactual cannot say what the alternative would have caused.
 
 ## 5. Module Boundaries
 
-The dependency rule is strict: **dependencies point inward toward `core`**. `core` imports
-nothing from MEMORIA. Packages are created when their phase starts, not before.
+The dependency rule: **dependencies point inward toward `core`**. `core` imports
+nothing from MEMORIA (tested in `tests/test_layering.py`), and only `neural` and `vectors`
+need an optional runtime (also tested). Layering is not perfectly strict; the exceptions are
+visible in the import graph: `retrieval` uses the embedding contract, and `experiments` composes
+higher layers (it resolves retrieval,
+consolidation, graph and forgetting components by name), and each `*_eval` module and
+`scenarios` refer to each other's benchmark record types. Packages are created when their
+phase starts, not before.
 
 ```
 core          records, hashing, time, history semantics, state fold  (exists)
@@ -1221,6 +1227,8 @@ belief_run, belief_report   Phase 11-12 generated worlds, studies, cases, run an
 autopsy       replay of stored runs at a cutoff, evidence-linked autopsy of memory answers and beliefs,
               fixed-evidence counterfactuals, substrate replay  (exists)
 autopsy_demo  the fixed autopsy / replay / counterfactual demonstration  (exists)
+lifecycle_demo  the end-to-end lifecycle demonstration: composes memory_lab's and autopsy_demo's
+              demonstrations, verifies the store and rebuilds both in an independent store  (exists)
 benchmark, benchmark_report, benchmark_run
               multi-seed benchmark over five environments, manifest, reproduction, report  (exists)
 identity      conservative entity identity for text: registry, outcomes, merge assertions  (exists)
@@ -1229,7 +1237,6 @@ adaptive      access and feedback events, leakage-safe ledger, auditable importa
 retention     retention schedules, feedback loop, longitudinal simulator, audit probes  (exists)
 adaptive_worlds, adaptive_cases, adaptive_study, adaptive_report, adaptive_run
               Super-Phase 5 generated worlds, designed cases, study, report and run  (exists)
-autopsy       Phase 17: autopsy records over graph.trace_provenance
 api           FastAPI surface over the above (no logic of its own)
 observatory   interactive visualisation (consumes api only)
 reports       evidence-backed reports generated from stored runs
@@ -1493,3 +1500,7 @@ deferrals — is in [ROADMAP.md](ROADMAP.md).
 | 2026-09-30 | Counterfactuals change exactly one of schedule, rank weight, importance; ingestion and identity are excluded (they would change the evidence). The result is labelled decision-level, not causal, and a re-simulation is reported beside it (I87). Rejected: calling the fixed-evidence difference an effect. | The feedback loop is part of the system; holding evidence fixed answers a different question. |
 | 2026-09-30 | The benchmark uses new seed families, declared parameter jitter and 16-key worlds; test and calibration families are separate (I88). Rejected: reusing the earlier phases' seeds. | Earlier numbers informed the designs; fresh seeds keep the benchmark from being tuned to them. |
 | 2026-09-30 | The benchmark reproduces a stated representative set of replicates (first, middle, last memory; first, last belief) rather than all runs; the analysis is recomputed from the stored runs. Rejected: re-running everything. | Bounded cost with exact digest comparison on the runs covered. |
+| 2026-09-30 | Release audit: `fetch_model` verifies each download before it becomes the pinned file and discards a corrupt one. Rejected: verifying only after all files are placed. | A corrupt file left in place was skipped by later fetches and failed verification forever. No stored digest is affected. |
+| 2026-09-30 | The layering statement is corrected to list its real exceptions and is enforced by tests (`core` imports nothing; only `neural` and `vectors` need optional runtimes). Rejected: restructuring `scenarios` and the `*_eval` modules. | The documentation claimed a stricter rule than the import graph obeys; a restructure would move no result. |
+| 2026-09-30 | `lifecycle_demo` composes the existing memory-lab and autopsy demonstrations and adds no science; it verifies the store and rebuilds both into an independent store. Rejected: a new bespoke end-to-end scenario. | An end-to-end artifact was needed; a new scenario would be unmeasured code. Its output is labelled a demonstration, not a benchmark. |
+| 2026-09-30 | Version 0.1.0: the scientific implementation is frozen apart from defects. Not published to PyPI. | Phases 13, 16 and 17 are partial and 14, 15, 18–22 are not built; the roadmap says so. |
