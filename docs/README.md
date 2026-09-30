@@ -29,5 +29,5 @@ deterministic demonstrations and the test suite.
 ## Diagrams
 
 Sources for the README figures are in [assets](assets): `hero.svg`, `lifecycle.svg`,
-`architecture.svg`, `autopsy-flow.svg`, and `social-preview.svg` (1280×640; GitHub's social preview
-must be uploaded as PNG or JPG in the repository settings).
+`architecture.svg`, `autopsy-flow.svg`, and `social-preview.svg` with its 1280×640 export `social-preview.png`. GitHub's social preview cannot be
+set through the CLI or API; upload the PNG in the repository settings (Settings → General → Social preview).

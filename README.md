@@ -210,7 +210,7 @@ docs/ARCHITECTURE.md    constitution: research questions, invariants, semantics,
 docs/ROADMAP.md         phase-by-phase scope and honest status
 docs/experiments/       one report per study, with definitions, results, negative findings
 docs/examples/          a committed output of the lifecycle demonstration
-docs/assets/            diagrams used in this README
+docs/assets/            diagrams used in this README, and the social-preview image
 .github/                CI, issue and pull-request templates
 ```
 

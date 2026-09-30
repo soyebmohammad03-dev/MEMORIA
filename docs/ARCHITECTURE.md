@@ -1196,7 +1196,7 @@ retrieval     signals, ranking, traces, extractive responder; lexical + recency 
 scenarios     deterministic research datasets with probes and ground truth  (exists)
 interventions seeded dataset perturbations  (exists)
 artifacts     content-addressed write-once local store  (exists)
-providers     adapters for LLMs, embedders, vector indexes (local-first)
+providers     adapters for LLMs, embedders, vector indexes (local-first)  (planned, not built; the embedder and index contracts live in core, embeddings, neural, vectors)
 experiments   registry, deterministic runner, reproduction check  (exists)
 comparison    answer readings and agreement  (exists)
 taxonomy      claims, relations, outcome classification  (exists)
@@ -1237,9 +1237,9 @@ adaptive      access and feedback events, leakage-safe ledger, auditable importa
 retention     retention schedules, feedback loop, longitudinal simulator, audit probes  (exists)
 adaptive_worlds, adaptive_cases, adaptive_study, adaptive_report, adaptive_run
               Super-Phase 5 generated worlds, designed cases, study, report and run  (exists)
-api           FastAPI surface over the above (no logic of its own)
-observatory   interactive visualisation (consumes api only)
-reports       evidence-backed reports generated from stored runs
+api           FastAPI surface over the above (no logic of its own)  (planned, Phase 20; not built)
+observatory   interactive visualisation (consumes api only)  (planned, Phase 20; not built)
+reports       evidence-backed reports generated from stored runs  (planned; per-study report modules exist instead)
 ```
 
 ### 5.1 Target architecture
